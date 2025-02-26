@@ -103,7 +103,7 @@ func (b *Book) downloadPage(pageNr string, retry int) {
 
 		if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 			fmt.Println("Authentication failed - check your cookies.")
-			fmt.Println("Try using -cookies with all cookies from your authenticated browser session.")
+			fmt.Println("Try using -cookie-file or -cookies with valid authentication.")
 			dumpCookies(b.client, "https://www.nb.no")
 		}
 
@@ -334,11 +334,22 @@ func parseCookiesString(cookiesStr string) []*http.Cookie {
 	return cookies
 }
 
+// readCookiesFromFile reads cookies from a file
+func readCookiesFromFile(filepath string) (string, error) {
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		return "", fmt.Errorf("error reading cookie file: %w", err)
+	}
+
+	return strings.TrimSpace(string(data)), nil
+}
+
 func main() {
 	// Define command-line flags
 	bookID := flag.String("id", "", "Book ID to download")
 	docType := flag.String("type", "digibok", "Document type: 'digibok' or 'pliktmonografi'")
 	cookiesStr := flag.String("cookies", "", "Authentication cookies in 'name1=value1; name2=value2' format")
+	cookieFile := flag.String("cookie-file", "", "Path to file containing authentication cookies")
 	bookLength := flag.Int("length", 0, "Book length (will calculate if not provided)")
 	imageWidth := flag.Int("width", 602, "Image width to request (default is 602px)")
 
@@ -356,11 +367,28 @@ func main() {
 		}
 	}
 
-	// Parse cookie string
+	// Parse cookies - prioritize file over direct string
 	var cookies []*http.Cookie
-	if *cookiesStr != "" {
-		cookies = parseCookiesString(*cookiesStr)
-		fmt.Printf("Using %d cookies from provided cookie string\n", len(cookies))
+	var cookieInput string
+
+	if *cookieFile != "" {
+		// Read cookies from file
+		fileContent, err := readCookiesFromFile(*cookieFile)
+		if err != nil {
+			fmt.Println(err)
+			os.Exit(1)
+		}
+		cookieInput = fileContent
+		fmt.Printf("Read cookies from file: %s\n", *cookieFile)
+	} else if *cookiesStr != "" {
+		// Use cookies from command line argument
+		cookieInput = *cookiesStr
+		fmt.Println("Using cookies from command line argument")
+	}
+
+	if cookieInput != "" {
+		cookies = parseCookiesString(cookieInput)
+		fmt.Printf("Using %d cookies for authentication\n", len(cookies))
 
 		// Print cookie names for debugging
 		cookieNames := make([]string, len(cookies))
@@ -373,7 +401,7 @@ func main() {
 	// Warn if trying to download pliktmonografi without cookies
 	if *docType == "pliktmonografi" && len(cookies) == 0 {
 		fmt.Println("WARNING: pliktmonografi documents typically require authentication.")
-		fmt.Println("If download fails, please provide authentication cookies with -cookies flag.")
+		fmt.Println("If download fails, please provide authentication cookies with -cookie-file or -cookies flag.")
 	}
 
 	b := NewBook(*bookID, *bookLength, *docType, cookies)

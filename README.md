@@ -13,9 +13,10 @@ This is a Go port of [akselsd/NB.no-Downloader](https://github.com/akselsd/NB.no
 - Download complete books from the Norwegian National Library
 - Support for both public (`digibok`) and restricted (`pliktmonografi`) document types
 - Automatically determine book length if not specified
-- Authentication support for restricted content
-- Assemble tiled images into complete pages
+- Authentication support for restricted content (including cookie file support)
 - Convert all pages into a single PDF file
+- Customizable image quality
+- Automatic detection of introduction pages (I1, I2, etc.)
 
 ## Prerequisites
 
@@ -56,10 +57,16 @@ go run main.go 123456789
 
 ### Restricted Content (With Authentication)
 
-To download restricted content that requires authentication:
+To download restricted content using a cookie file (recommended):
 
 ```bash
-go run main.go -id 000040863 -type pliktmonografi -cookie "your-session-cookie-value"
+go run main.go -id 000040863 -type pliktmonografi -cookie-file cookies.txt
+```
+
+Alternative method with direct cookie string:
+
+```bash
+go run main.go -id 000040863 -type pliktmonografi -cookies "_nblb=value; nbsso=value; NTID=value"
 ```
 
 ### Command Line Options
@@ -68,20 +75,27 @@ go run main.go -id 000040863 -type pliktmonografi -cookie "your-session-cookie-v
 |------|-------------|---------|
 | `-id` | Book ID to download | Required |
 | `-type` | Document type: 'digibok' or 'pliktmonografi' | digibok |
-| `-cookie` | Authentication cookie value (required for restricted content) | "" |
-| `-cookie-name` | Authentication cookie name | "JSESSIONID" |
+| `-cookie-file` | Path to file containing authentication cookies | "" |
+| `-cookies` | Authentication cookies in 'name1=value1; name2=value2' format | "" |
 | `-length` | Book length (will calculate if not provided) | 0 |
+| `-width` | Image width in pixels for higher quality | 602 |
 
-## How to Find Your Authentication Cookie
+## How to Create a Cookie File
 
-For restricted content (pliktmonografi), you need to provide an authentication cookie:
+For restricted content (pliktmonografi), the easiest way to authenticate is with a cookie file:
 
 1. Log in to www.nb.no in your browser
-2. Open developer tools (F12 in most browsers)
-3. Go to the Application/Storage tab
-4. Find Cookies for the www.nb.no domain
-5. Look for authentication cookies (often JSESSIONID or similar)
-6. Copy the Value field to use with the `-cookie` flag
+2. Open developer tools (F12)
+3. Go to the Network tab and reload the page
+4. Click on any request to www.nb.no
+5. In the "Headers" tab, find the "Cookie:" header
+6. Copy the entire value (without the "Cookie:" prefix)
+7. Paste it into a text file (e.g., `cookies.txt`) and save
+
+Example cookie file content:
+```
+_nblb=value; nbsso=value; NTID=value; nb_dark_mode_enabled=true
+```
 
 ## Examples
 
@@ -91,10 +105,10 @@ For restricted content (pliktmonografi), you need to provide an authentication c
 go run main.go -id 123456789
 ```
 
-### Download a Restricted Book with Authentication
+### Download a Restricted Book with Cookie File
 
 ```bash
-go run main.go -id 000040863 -type pliktmonografi -cookie "1A2B3C4D5E6F7G8H9I0J"
+go run main.go -id 000040863 -type pliktmonografi -cookie-file cookies.txt
 ```
 
 ### Download with Known Page Count
@@ -103,10 +117,10 @@ go run main.go -id 000040863 -type pliktmonografi -cookie "1A2B3C4D5E6F7G8H9I0J"
 go run main.go -id 123456789 -length 200
 ```
 
-### Using a Different Cookie Name
+### Download Higher Quality Images
 
 ```bash
-go run main.go -id 000040863 -type pliktmonografi -cookie "1A2B3C4D5E6F7G8H9I0J" -cookie-name "NB_SESSION"
+go run main.go -id 123456789 -width 1024
 ```
 
 ## Output
@@ -121,11 +135,10 @@ The script will:
 
 ### Authentication Issues
 
-If you receive "401 Unauthorized" errors with pliktmonografi documents:
-- Ensure you're logged in to www.nb.no in your browser
-- Check that you've copied the correct cookie value
-- Try using a different cookie (some sites use multiple cookies for authentication)
-- Remember that your session may expire, requiring a new cookie value
+If you receive "401 Unauthorized" or "403 Forbidden" errors with pliktmonografi documents:
+- Ensure you're logged in to www.nb.no in your browser when you copy the cookies
+- Make sure you've copied the entire cookie string without modifications
+- Remember that your session may expire, requiring new cookies
 
 ### Download Failures
 
@@ -137,7 +150,6 @@ If image downloads fail:
 
 ## Limitations
 
-- The script requires you to be logged in to access restricted content
 - Session cookies expire, so you may need to update them for long downloads
 - Very large books may take significant time and disk space
 - The National Library may change their API or structure, requiring updates to this tool
