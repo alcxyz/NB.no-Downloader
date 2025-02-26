@@ -83,8 +83,6 @@ For restricted content (pliktmonografi), you need to provide an authentication c
 5. Look for authentication cookies (often JSESSIONID or similar)
 6. Copy the Value field to use with the `-cookie` flag
 
-![Finding cookies in browser](https://i.imgur.com/example.png)
-
 ## Examples
 
 ### Download a Public Book
