@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Turning recognised words into flowing text. The rules are heuristics
@@ -16,7 +17,7 @@ import (
 
 const (
 	minTextWords      = 15   // pages with fewer words are shown as images
-	headZone          = 0.10 // running heads live in the top or bottom tenth
+	headZone          = 0.12 // running heads live in the top or bottom eighth
 	headingRatio      = 1.5  // line height that makes a heading
 	chapterRatio      = 2.0  // line height that makes a chapter heading
 	sinkDepth         = 0.08 // text starting this much lower than usual opens a chapter
@@ -42,6 +43,7 @@ type layoutPage struct {
 	Kind      pageKind
 	ImageOnly bool // render the whole page as an image
 	Blank     bool // leave the page out
+	Title     bool // a page holding only a chapter or part title
 }
 
 // figureRef asks the caller for an image: a whole page, or a region of it
@@ -94,7 +96,7 @@ func measureBook(pages []layoutPage) bookStats {
 			}
 			if len(body) >= 2 {
 				for _, l := range body {
-					heights = append(heights, l.Box.H()/pg.Height)
+					heights = append(heights, lineHeight(l)/pg.Height)
 				}
 			}
 		}
@@ -149,7 +151,29 @@ func textBlocks(pg *textPage, st bookStats) []textBlock {
 		}
 		out = append(out, b)
 	}
-	return out
+	return dropPageNumber(out, pg)
+}
+
+// dropPageNumber removes a lone page number left first or last on a page,
+// in its top or bottom fifth, just outside the running head zones.
+func dropPageNumber(blocks []textBlock, pg *textPage) []textBlock {
+	lone := func(b textBlock) bool {
+		if b.Image || len(b.Lines) != 1 || len(b.Lines[0].Words) != 1 {
+			return false
+		}
+		if b.Box.Y0 > pg.Height*0.2 && b.Box.Y1 < pg.Height*0.8 {
+			return false
+		}
+		t := strings.Trim(b.Lines[0].Words[0].Text, "-–— ")
+		return t != "" && len(t) <= 3 && strings.Trim(t, "0123456789") == ""
+	}
+	if n := len(blocks); n > 0 && lone(blocks[n-1]) {
+		blocks = blocks[:n-1]
+	}
+	if len(blocks) > 0 && lone(blocks[0]) {
+		blocks = blocks[1:]
+	}
+	return blocks
 }
 
 // appendImage adds a picture region, joining it to the previous one when
@@ -166,18 +190,24 @@ func appendImage(blocks []textBlock, box rect, pg *textPage) []textBlock {
 // short and in the top or bottom tenth of the page. It returns the letters
 // the line would be recognised by on other pages.
 func headLine(l textLine, pg *textPage) (string, bool) {
-	if len(l.Words) == 0 || len(l.Words) > 8 {
+	if len(l.Words) == 0 || len(l.Words) > 12 {
 		return "", false
 	}
 	if l.Box.Y1 > pg.Height*headZone && l.Box.Y0 < pg.Height*(1-headZone) {
 		return "", false
 	}
+	// Only real words make the key: OCR junk next to a page number
+	// differs from page to page.
 	var key strings.Builder
 	for _, w := range l.Words {
+		var letters strings.Builder
 		for _, r := range w.Text {
 			if unicode.IsLetter(r) {
-				key.WriteRune(unicode.ToLower(r))
+				letters.WriteRune(unicode.ToLower(r))
 			}
+		}
+		if utf8.RuneCountInString(letters.String()) >= 3 {
+			key.WriteString(letters.String())
 		}
 	}
 	return key.String(), true
@@ -239,6 +269,105 @@ func letterShare(b textBlock) float64 {
 		return 0
 	}
 	return float64(letters) / float64(chars)
+}
+
+// markPictures decides which pages to show as images: pages with little
+// text, such as title and picture pages, and the imprint. It leaves out
+// the printed table of contents, whose page numbers mean nothing in an
+// EPUB. Pages with no word read with confidence may be blank; their
+// indexes are returned for a look at the page image.
+func markPictures(pages []layoutPage, textPages []int) []int {
+	st := measureBook(pages)
+	// Sparse pages before the first full page of text are front matter
+	// (half-title, title page) and stay images; later ones holding a short
+	// title in capitals open a chapter or part.
+	firstBody := -1
+	for _, i := range textPages {
+		if pg := pages[i].Text; pg != nil && wordCount(textBlocks(pg, st)) >= 80 {
+			firstBody = i
+			break
+		}
+	}
+	var check []int
+	for _, i := range textPages {
+		pg := pages[i].Text
+		if pg != nil && i < 15 && contentsPage(textBlocks(pg, st)) {
+			pages[i].Blank = true
+			continue
+		}
+		if pg == nil || sparsePage(textBlocks(pg, st)) || (i < 12 && imprintPage(pg)) {
+			blocks := []textBlock(nil)
+			if pg != nil {
+				blocks = textBlocks(pg, st)
+			}
+			if firstBody >= 0 && i > firstBody && titlePage(blocks, pg, st) {
+				pages[i].Title = true
+				continue
+			}
+			if pg != nil && hasRealWord(blocks) {
+				pages[i].ImageOnly = true
+				continue
+			}
+			check = append(check, i)
+		}
+	}
+	return check
+}
+
+// titlePage spots a page holding only a short title: a few words in
+// capitals, perhaps under a part or chapter number.
+func titlePage(blocks []textBlock, pg *textPage, st bookStats) bool {
+	text := titleText(blocks)
+	words := strings.Fields(text)
+	if len(words) == 0 || len(words) > 15 || !hasRealWord(blocks) {
+		return false
+	}
+	if n := chapterNumber(words[0]); n != "" {
+		text = strings.Join(words[1:], " ")
+	}
+	if text == "" {
+		return false
+	}
+	var lines []textLine
+	for _, b := range blocks {
+		lines = append(lines, b.Lines...)
+	}
+	large := st.bodyLH > 0 && len(lines) > 0 && medianLineHeight(lines, pg) >= st.bodyLH*headingRatio
+	return mostlyCapitals(text) || large
+}
+
+// titleText joins the lines of a title page, putting a leading part or
+// chapter number right ("111 LAVRANS" becomes "III. LAVRANS").
+func titleText(blocks []textBlock) string {
+	var lines []string
+	for _, b := range blocks {
+		for _, l := range b.Lines {
+			if t := strings.TrimSpace(joinLines([]textLine{l})); t != "" {
+				lines = append(lines, t)
+			}
+		}
+	}
+	if len(lines) > 1 {
+		if n := chapterNumber(lines[0]); n != "" {
+			lines[0] = strings.TrimSuffix(n, ".") + "."
+		}
+	}
+	return strings.Join(lines, " ")
+}
+
+// contentsPage spots the printed table of contents by its title.
+func contentsPage(blocks []textBlock) bool {
+	for _, b := range blocks {
+		if b.Image || len(b.Lines) == 0 {
+			continue
+		}
+		switch strings.ToLower(strings.Trim(lineText(b.Lines[0]), " .:")) {
+		case "innhold", "innholdsfortegnelse", "innhald", "contents", "table of contents":
+			return true
+		}
+		return false
+	}
+	return false
 }
 
 // sparsePage spots pages that read better as an image: almost no text, or
@@ -321,19 +450,27 @@ func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 		}
 		pg := lp.Text
 		blocks := textBlocks(pg, st)
+		if lp.Title {
+			paras = append(paras, para{kind: "chapter", page: i}, para{kind: "h1", text: titleText(blocks), page: i})
+			continue
+		}
 		col := textColumn(blocks, pg)
 		first := true
-		var prevText *textBlock
+		var prev *textBlock // the block above, text or picture
 		for bi, b := range blocks {
 			if !b.Image {
 				switch {
-				case prevText == nil && st.top > 0 && b.Box.Y0/pg.Height > st.top+sinkDepth:
+				case prev == nil && st.top > 0 && b.Box.Y0/pg.Height > st.top+sinkDepth && hasRealWord([]textBlock{b}):
 					paras = append(paras, para{kind: "chapter", page: i})
-				case prevText != nil && st.bodyLH > 0 && b.Box.Y0-prevText.Box.Y1 > breakGap*st.bodyLH*pg.Height:
+				case prev != nil && !prev.Image && st.bodyLH > 0 && b.Box.Y0-prev.Box.Y1 > breakGap*st.bodyLH*pg.Height &&
+					len(paras) > 0 && paras[len(paras)-1].kind == "p":
+					// Only a gap between two stretches of body text is a
+					// scene break; space around pictures and after
+					// headings is layout.
 					paras = append(paras, para{kind: "break", page: i})
 				}
-				prevText = &blocks[bi]
 			}
+			prev = &blocks[bi]
 			if b.Image {
 				if b.Box.W()*b.Box.H() < minFigureArea*pg.Width*pg.Height {
 					continue
@@ -343,6 +480,7 @@ func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 				paras = append(paras, para{kind: "figure", image: name, page: i})
 				continue
 			}
+			fixDropCap(b.Lines)
 			parts := splitParagraphs(b, col)
 			if headingBlock(b, pg, st) {
 				parts = [][]textLine{b.Lines}
@@ -378,14 +516,62 @@ func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 	paras = mergeContinued(paras)
 	for i := range paras {
 		paras[i].text = fixOCR(paras[i].text)
-		// A short line without a full stop opening a chapter is its title,
-		// even when it is not set larger than the text.
-		if i > 0 && paras[i-1].kind == "chapter" && paras[i].kind == "p" &&
-			len(strings.Fields(paras[i].text)) <= 6 && !endsSentence(paras[i].text) && i+1 < len(paras) && !startsLower(paras[i+1].text) {
-			paras[i].kind = "h1"
+	}
+	paras = chapterTitles(paras, st)
+	return chapters(paras), figures
+}
+
+// chapterTitles settles headings where a chapter opens. Short lines
+// without a full stop at the top of a new chapter make up its title, even
+// when set only a little larger than the text or in capitals over several
+// lines. A lone number is a chapter number only when text follows it on
+// its page; otherwise it was a chart label or a note number.
+func chapterTitles(paras []para, st bookStats) []para {
+	var out []para
+	for i := 0; i < len(paras); i++ {
+		p := paras[i]
+		if (p.kind == "h1" || p.kind == "h2") && chapterNumber(p.text) != "" {
+			next := i + 1
+			if next >= len(paras) || paras[next].page != p.page || paras[next].kind != "p" || !startsUpper(paras[next].text) {
+				p.kind = "p"
+			}
+		}
+		out = append(out, p)
+		if p.kind != "chapter" {
+			continue
+		}
+		var title []string
+		j := i + 1
+		for ; j < len(paras) && len(title) < 4; j++ {
+			q := paras[j]
+			if q.page != p.page || (q.kind != "p" && q.kind != "h1" && q.kind != "h2") ||
+				len(strings.Fields(q.text)) > 8 || endsSentence(q.text) || chapterNumber(q.text) != "" {
+				break
+			}
+			if !mostlyCapitals(q.text) && q.lh < st.bodyLH*1.15 && len(title) > 0 {
+				break
+			}
+			title = append(title, q.text)
+		}
+		if len(title) > 0 && (j >= len(paras) || !startsLower(paras[j].text)) {
+			out = append(out, para{kind: "h1", text: strings.Join(title, " "), page: p.page, lh: paras[i+1].lh})
+			i = j - 1
 		}
 	}
-	return chapters(paras), figures
+	return out
+}
+
+func mostlyCapitals(s string) bool {
+	upper, letters := 0, 0
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			letters++
+			if unicode.IsUpper(r) {
+				upper++
+			}
+		}
+	}
+	return letters > 0 && upper*10 >= letters*8
 }
 
 // fixOCR corrects slips Tesseract makes in Norwegian text: the preposition
@@ -429,7 +615,22 @@ func startsUpper(s string) bool {
 func medianLineHeight(lines []textLine, pg *textPage) float64 {
 	var hs []float64
 	for _, l := range lines {
-		hs = append(hs, l.Box.H()/pg.Height)
+		hs = append(hs, lineHeight(l)/pg.Height)
+	}
+	return median(hs)
+}
+
+// lineHeight is the typical height of a line's words, so that one tall
+// drop cap does not make a line of text look like a heading.
+func lineHeight(l textLine) float64 {
+	var hs []float64
+	for _, w := range l.Words {
+		if w.Box.H() > 0 {
+			hs = append(hs, w.Box.H())
+		}
+	}
+	if len(hs) == 0 {
+		return l.Box.H()
 	}
 	return median(hs)
 }
@@ -491,6 +692,37 @@ func headingBlock(b textBlock, pg *textPage, st bookStats) bool {
 	return medianLineHeight(b.Lines, pg)/st.bodyLH >= headingRatio
 }
 
+// fixDropCap mends the large initial that opens many chapters. OCR reads
+// a drop-cap "I" before a year as "1" ("12001" for "I 2001") and often
+// splits a drop-cap letter from the rest of its word ("D et").
+func fixDropCap(lines []textLine) {
+	if len(lines) == 0 || len(lines[0].Words) < 3 {
+		return
+	}
+	words := lines[0].Words
+	var rest []float64
+	for _, w := range words[1:] {
+		rest = append(rest, w.Box.H())
+	}
+	if words[0].Box.H() < median(rest)*1.5 {
+		return
+	}
+	first := words[0].Text
+	if len(first) <= 2 && strings.Trim(first, "I1l|") == "" {
+		words[0].Text = "I" // "I1 1869" for "I 1869"
+		return
+	}
+	if len(first) >= 2 && strings.ContainsRune("1l|", rune(first[0])) && strings.Trim(first[1:], "0123456789") == "" {
+		words[0].Text = "I " + first[1:]
+		return
+	}
+	if r := []rune(first); len(r) == 1 && unicode.IsUpper(r[0]) && startsLower(words[1].Text) {
+		words[1].Text = first + words[1].Text
+		words[1].Box = words[0].Box.union(words[1].Box)
+		lines[0].Words = words[1:]
+	}
+}
+
 // chapterNumber recognises a chapter numbered with a lone numeral, such as
 // "II." or "12", and returns it with roman numerals OCR read as ones or
 // ells put right ("11." becomes "II.").
@@ -525,7 +757,8 @@ func chapterNumber(text string) string {
 			return ""
 		}
 		return fixed + strings.TrimPrefix(t, core)
-	case digits:
+	case digits && len(core) <= 2:
+		// Longer numbers are years and other figures, as on chart axes.
 		return t
 	}
 	return ""
@@ -688,6 +921,11 @@ func endsSentence(s string) bool {
 func mergeContinued(paras []para) []para {
 	var out []para
 	for _, p := range paras {
+		// A gap followed by lower case was a page or column turn, not a
+		// scene break.
+		if n := len(out); n > 0 && p.kind == "p" && out[n-1].kind == "break" && startsLower(p.text) {
+			out = out[:n-1]
+		}
 		if n := len(out); n > 0 && p.kind == "p" {
 			// Look past figures and footnotes, which sit between the halves
 			// of a paragraph broken across pages.
@@ -724,6 +962,7 @@ func chapters(paras []para) []epubChapter {
 	title := ""
 	startPage := -1
 	afterHeading := true
+	hasText := false // a chapter holding only headings so far stays open
 	flush := func() {
 		if strings.TrimSpace(body.String()) != "" {
 			out = append(out, epubChapter{Title: title, Body: body.String()})
@@ -731,15 +970,18 @@ func chapters(paras []para) []epubChapter {
 		body.Reset()
 		title = ""
 		afterHeading = true
+		hasText = false
 	}
 	for i, p := range paras {
 		switch {
 		case p.kind == "chapter":
-			flush()
-			title = chapterTitle(paras[i+1:])
+			if hasText || title == "" {
+				flush()
+				title = chapterTitle(paras[i+1:])
+			}
 			startPage = p.page
 			continue
-		case p.kind == "h1" && (title == "" || body.Len() > 0):
+		case p.kind == "h1" && (title == "" || hasText):
 			flush()
 			title = chapterTitle(paras[i:])
 			startPage = p.page
@@ -765,9 +1007,11 @@ func chapters(paras []para) []epubChapter {
 			}
 		case "note":
 			fmt.Fprintf(&body, "<p class=\"note\">%s</p>\n", xmlEscape(p.text))
+			hasText = true
 		case "figure":
 			fmt.Fprintf(&body, "<figure class=\"%s\"><img src=\"images/%s\" alt=\"\"/></figure>\n", figureClass(p.image), p.image)
 			afterHeading = true
+			hasText = true
 		default:
 			if afterHeading {
 				fmt.Fprintf(&body, "<p class=\"noindent\">%s</p>\n", xmlEscape(p.text))
@@ -775,6 +1019,7 @@ func chapters(paras []para) []epubChapter {
 				fmt.Fprintf(&body, "<p>%s</p>\n", xmlEscape(p.text))
 			}
 			afterHeading = false
+			hasText = true
 		}
 	}
 	flush()

@@ -379,3 +379,69 @@ func TestSaveEPUBFromALTO(t *testing.T) {
 		t.Errorf("chapter text wrong: %q", ch)
 	}
 }
+
+func TestCorrectWords(t *testing.T) {
+	word := func(text string, conf float64) textWord { return textWord{Text: text, Conf: conf} }
+	sure := func(text string) textWord { return word(text, 0.97) }
+	pg := &textPage{Width: 1000, Height: 1500, Blocks: []textBlock{{Lines: []textLine{{Words: []textWord{
+		sure("næringsstøtte"), sure("næringsstøtte"), sure("næringsstøtte"), sure("Sammenhengene"),
+		sure("efter"), sure("efter"), sure("efter"),
+		word("næringsstotte,", 0.6), // ø read as o: corrected, comma kept
+		word("Naeringsstøtte", 0.6), // no single confusion away: kept
+		word("NÆRINGSSTOTTE", 0.5),  // capitals kept
+		word("etter", 0.5),          // not one confusion from "efter": the book's old spelling is not forced on it
+		word("næringsstotte", 0.95), // read with confidence: kept
+	}}}}}}
+	st := correctWords([]layoutPage{{Text: pg}})
+	got := []string{}
+	for _, w := range pg.Blocks[0].Lines[0].Words[7:] {
+		got = append(got, w.Text)
+	}
+	want := []string{"næringsstøtte,", "Naeringsstøtte", "NÆRINGSSTØTTE", "etter", "næringsstotte"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("corrected words = %q, want %q", got, want)
+	}
+	if st.corrected != 2 {
+		t.Errorf("corrected %d words, want 2: %+v", st.corrected, pg.Blocks[0].Lines[0].Words)
+	}
+}
+
+func TestStripNoteMarker(t *testing.T) {
+	for in, want := range map[string]string{
+		"tider.**9": "tider.", "forfektet.3*": "forfektet.", "tynne*": "tynne", `være."*`: `være."`,
+		"1960.": "1960.", "nr.3": "nr.3", "side": "side", "2,5": "2,5", "fallende.**": "fallende.",
+	} {
+		if got := stripNoteMarker(in); got != want {
+			t.Errorf("stripNoteMarker(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSplitRunTogether(t *testing.T) {
+	vocab := map[string]int{"har": 9, "til": 9, "hørt": 5, "en": 9, "svært": 6, "liten": 6, "kroner": 6, "i": 50,
+		"arbeid": 5, "s": 7, "avklaring": 3, "penger": 4, "for": 9, "tid": 4,
+		"marginal": 6, "ser": 8, "ingen": 9, "effektiv": 7, "it": 3, "et": 20}
+	for in, want := range map[string]string{
+		"hartilhørtensværtliten":  "har til hørt en svært liten",
+		"kroneri":                 "kroner i",
+		"arbeidsavklaringspenger": "",
+		"fortiden":                "",
+		"marginaliseringen":       "",
+		"effektiviteten":          "",
+	} {
+		if got := strings.Join(splitRunTogether(in, vocab), " "); got != want {
+			t.Errorf("splitRunTogether(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestWithoutFigures(t *testing.T) {
+	chs := []epubChapter{
+		{Title: "A", Body: "<p>Tekst</p>\n<figure class=\"figure\"><img src=\"images/p0003-1.jpg\" alt=\"\"/></figure>\n<p>Mer</p>\n"},
+		{Title: "B", Body: "<figure class=\"pageimage\"><img src=\"images/p0009.jpg\" alt=\"\"/></figure>\n"},
+	}
+	got := withoutFigures(chs, []string{"p0003-1.jpg", "p0009.jpg"})
+	if len(got) != 1 || got[0].Body != "<p>Tekst</p>\n<p>Mer</p>\n" {
+		t.Errorf("withoutFigures = %+v", got)
+	}
+}

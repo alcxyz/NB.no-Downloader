@@ -80,21 +80,13 @@ func saveEPUB(ctx context.Context, d *downloader, book *Book, identifier, outPat
 		return fmt.Errorf("%w (work files are kept in %s; try again to resume)", err, dir)
 	}
 
+	if st := correctWords(pages); st.corrected > 0 {
+		fmt.Fprintf(os.Stderr, "corrected %d of %d doubtful words against the book's vocabulary\n", st.corrected, st.doubtful)
+	}
+
 	// Pages with little text are either blank or pictures and title pages,
 	// which read better as images.
-	st := measureBook(pages)
-	var candidates []int
-	for _, i := range textPages {
-		if pages[i].Text == nil || sparsePage(textBlocks(pages[i].Text, st)) || (i < 12 && imprintPage(pages[i].Text)) {
-			// A page with a word read with confidence is not blank, however
-			// small the print; only the others need a look at the image.
-			if pages[i].Text != nil && hasRealWord(textBlocks(pages[i].Text, st)) {
-				pages[i].ImageOnly = true
-				continue
-			}
-			candidates = append(candidates, i)
-		}
-	}
+	candidates := markPictures(pages, textPages)
 	err = parallel(ctx, len(candidates), opts.workers, func(done, total int) { report("Checking pictures", done, total) },
 		func(ctx context.Context, j int) error {
 			i := candidates[j]
@@ -144,7 +136,13 @@ func saveEPUB(ctx context.Context, d *downloader, book *Book, identifier, outPat
 		func(ctx context.Context, j int) error {
 			data, err := d.cachedImage(ctx, filepath.Join(dir, "img-"+jobs[j].name), jobs[j].url)
 			if err != nil {
-				return fmt.Errorf("picture %s: %w", jobs[j].name, err)
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				// One picture nb.no keeps refusing should not cost the
+				// whole book; it is left out.
+				fmt.Fprintf(os.Stderr, "\nwarning: leaving out picture %s: %v\n", jobs[j].name, err)
+				return nil
 			}
 			images[j] = epubImage{Name: jobs[j].name, Data: data, MediaType: "image/jpeg"}
 			return nil
@@ -153,12 +151,25 @@ func saveEPUB(ctx context.Context, d *downloader, book *Book, identifier, outPat
 		return fmt.Errorf("%w (work files are kept in %s; try again to resume)", err, dir)
 	}
 
-	eb := &epubBook{Meta: meta, Chapters: chapters}
+	eb := &epubBook{Meta: meta}
 	if cover >= 0 {
-		eb.Cover = &images[0]
+		if images[0].Data != nil {
+			eb.Cover = &images[0]
+		}
 		images = images[1:]
 	}
-	eb.Images = images
+	var missing []string
+	for _, img := range images {
+		if img.Data != nil {
+			eb.Images = append(eb.Images, img)
+		}
+	}
+	for j, img := range images {
+		if img.Data == nil {
+			missing = append(missing, jobs[len(jobs)-len(images)+j].name)
+		}
+	}
+	eb.Chapters = withoutFigures(chapters, missing)
 
 	report("Writing EPUB", 0, 1)
 	tmp := outPath + ".part"
@@ -415,4 +426,33 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// withoutFigures removes the figures whose pictures could not be fetched.
+func withoutFigures(chapters []epubChapter, names []string) []epubChapter {
+	if len(names) == 0 {
+		return chapters
+	}
+	out := make([]epubChapter, 0, len(chapters))
+	for _, ch := range chapters {
+		for _, name := range names {
+			src := `src="images/` + name + `"`
+			for {
+				i := strings.Index(ch.Body, src)
+				if i < 0 {
+					break
+				}
+				start := strings.LastIndex(ch.Body[:i], "<figure")
+				end := strings.Index(ch.Body[i:], "</figure>\n")
+				if start < 0 || end < 0 {
+					break
+				}
+				ch.Body = ch.Body[:start] + ch.Body[i+end+len("</figure>\n"):]
+			}
+		}
+		if strings.TrimSpace(ch.Body) != "" {
+			out = append(out, ch)
+		}
+	}
+	return out
 }
