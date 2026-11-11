@@ -27,6 +27,7 @@ func main() {
 }
 
 const usage = `Usage:
+  nbdl browse [flags]        browse nb.no in a dedicated browser with a download button
   nbdl login                 log in to nb.no in a dedicated browser window
   nbdl logout                forget the saved nb.no login
   nbdl [download] [flags] <book id | URN | nb.no URL>
@@ -37,6 +38,8 @@ Download flags:
 func run(args []string) error {
 	if len(args) > 0 {
 		switch args[0] {
+		case "browse":
+			return browse(args[1:])
 		case "login":
 			return login()
 		case "logout":
@@ -99,7 +102,7 @@ func run(args []string) error {
 	if loggedIn {
 		fmt.Fprintln(os.Stderr, "using nb.no login")
 	}
-	jar, err := newJar(cookies)
+	d, err := newDownloader(cookies)
 	if err != nil {
 		return err
 	}
@@ -108,21 +111,9 @@ func run(args []string) error {
 	if pdfPath == "" {
 		pdfPath = outputStem(input, identifier) + ".pdf"
 	}
-	pagesDir := strings.TrimSuffix(pdfPath, filepath.Ext(pdfPath)) + "_pages"
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-
-	d := &downloader{
-		client:     &http.Client{Jar: jar, Timeout: 2 * time.Minute},
-		authDomain: "nb.no",
-		manifest:   manifestBase,
-		retries:    15,
-		retryDelay: 250 * time.Millisecond,
-	}
-	if loggedIn {
-		d.tokenURL = tokenURL
-	}
 
 	book, err := d.fetchBook(ctx, identifier)
 	if err != nil {
@@ -137,14 +128,53 @@ func run(args []string) error {
 		fmt.Fprintln(os.Stderr, "warning: pliktmonografi items usually need a login (nbdl login)")
 	}
 
-	err = d.downloadPages(ctx, book, pagesDir, *width, *workers, func(done, total int) {
+	opts := saveOptions{width: *width, workers: *workers, keepPages: *keepPages}
+	err = saveBook(ctx, d, book, pdfPath, opts, func(done, total int) {
 		fmt.Fprintf(os.Stderr, "\rdownloaded %d/%d pages", done, total)
 	})
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
-		return fmt.Errorf("%w (downloaded pages are kept in %s; run again to resume)", err, pagesDir)
+		return err
 	}
+	fmt.Fprintf(os.Stderr, "saved %s\n", pdfPath)
+	if n := d.retried.Load(); n > 0 {
+		fmt.Fprintf(os.Stderr, "(%d requests were retried after transient errors)\n", n)
+	}
+	return nil
+}
 
+// newDownloader returns a downloader that sends the given nb.no cookies,
+// and the SSO access token when they include a login.
+func newDownloader(cookies []*http.Cookie) (*downloader, error) {
+	jar, err := newJar(cookies)
+	if err != nil {
+		return nil, err
+	}
+	d := &downloader{
+		client:     &http.Client{Jar: jar, Timeout: 2 * time.Minute},
+		authDomain: "nb.no",
+		manifest:   manifestBase,
+		retries:    15,
+		retryDelay: 250 * time.Millisecond,
+	}
+	if hasLogin(cookies) {
+		d.tokenURL = tokenURL
+	}
+	return d, nil
+}
+
+type saveOptions struct {
+	width, workers int
+	keepPages      bool
+}
+
+// saveBook downloads every page of book next to pdfPath and writes the PDF.
+// The page images are kept after a failure, so a retry resumes.
+func saveBook(ctx context.Context, d *downloader, book *Book, pdfPath string, opts saveOptions, progress func(done, total int)) error {
+	pagesDir := strings.TrimSuffix(pdfPath, filepath.Ext(pdfPath)) + "_pages"
+	if err := d.downloadPages(ctx, book, pagesDir, opts.width, opts.workers, progress); err != nil {
+		return fmt.Errorf("%w (downloaded pages are kept in %s; try again to resume)", err, pagesDir)
+	}
 	pages := make([]pdfPage, len(book.Pages))
 	for i, p := range book.Pages {
 		pages[i] = pdfPage{Path: pageFile(pagesDir, i), InchesPerPixel: p.InchesPerPixel, OriginalWidth: p.Width}
@@ -152,12 +182,7 @@ func run(args []string) error {
 	if err := savePDF(pdfPath, book.Title, pages); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "saved %s\n", pdfPath)
-	if n := d.retried.Load(); n > 0 {
-		fmt.Fprintf(os.Stderr, "(%d requests were retried after transient errors)\n", n)
-	}
-
-	if !*keepPages {
+	if !opts.keepPages {
 		return os.RemoveAll(pagesDir)
 	}
 	return nil

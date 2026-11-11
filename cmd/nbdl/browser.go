@@ -77,7 +77,7 @@ func launchBrowser(headless bool) (*rod.Browser, *launcher.Launcher, error) {
 	controlURL, err := l.Launch()
 	if err != nil {
 		if strings.Contains(err.Error(), "ProcessSingleton") || strings.Contains(err.Error(), "profile appears to be in use") {
-			return nil, nil, fmt.Errorf("the nb.no browser profile is in use; close the login window first")
+			return nil, nil, fmt.Errorf("the nb.no browser profile is in use; close the nbdl browser window first")
 		}
 		return nil, nil, fmt.Errorf("launch browser %s: %w", bin, err)
 	}
