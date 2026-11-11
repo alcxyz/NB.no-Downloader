@@ -81,7 +81,9 @@ func launchBrowser(headless bool) (*rod.Browser, *launcher.Launcher, error) {
 		}
 		return nil, nil, fmt.Errorf("launch browser %s: %w", bin, err)
 	}
-	b := rod.New().ControlURL(controlURL)
+	// rod emulates a fixed laptop screen on new pages by default, which
+	// leaves most of a larger window empty; let pages fill the window.
+	b := rod.New().ControlURL(controlURL).NoDefaultDevice()
 	if err := b.Connect(); err != nil {
 		l.Kill()
 		return nil, nil, err
