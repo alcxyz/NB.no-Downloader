@@ -14,11 +14,13 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 const (
 	manifestBase = "https://api.nb.no/catalog/v1/iiif/"
+	tokenURL     = "https://www.nb.no/nbssotoken"
 	userAgent    = "NB.no-Downloader (+https://github.com/alcxyz/NB.no-Downloader)"
 )
 
@@ -30,7 +32,7 @@ var (
 
 // errAuth marks a page that the server refused to serve, which usually means
 // missing or expired cookies.
-var errAuth = errors.New("access denied (401/403): check your cookies")
+var errAuth = errors.New("access denied (401/403): check your login")
 
 // Page is one canvas of a book, in reading order.
 type Page struct {
@@ -87,11 +89,20 @@ func outputStem(input, identifier string) string {
 
 type downloader struct {
 	client     *http.Client
-	cookies    string // raw Cookie header value
-	cookieHost string // cookies go only to this host and its subdomains
+	authDomain string // the access token goes only to this domain
 	manifest   string // manifest URL; overridable in tests
 	retries    int
 	retryDelay time.Duration
+
+	// tokenURL exchanges the SSO cookie for an access token, which nb.no
+	// expects on API and image requests from logged-in users. Empty when
+	// not logged in.
+	tokenURL string
+	tokenMu  sync.Mutex
+	token    string
+	tokenExp time.Time
+
+	retried atomic.Int64 // failed attempts that were retried
 }
 
 func (d *downloader) get(ctx context.Context, rawURL string) (*http.Response, error) {
@@ -100,14 +111,45 @@ func (d *downloader) get(ctx context.Context, rawURL string) (*http.Response, er
 		return nil, err
 	}
 	req.Header.Set("User-Agent", userAgent)
-	if d.cookies != "" && hostWithin(req.URL.Hostname(), d.cookieHost) {
-		req.Header.Set("Cookie", d.cookies)
+	if d.tokenURL != "" && rawURL != d.tokenURL && hostWithin(req.URL.Hostname(), d.authDomain) {
+		token, err := d.accessToken(ctx)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	return d.client.Do(req)
 }
 
-func hostWithin(host, domain string) bool {
-	return host == domain || strings.HasSuffix(host, "."+domain)
+// accessToken returns a cached access token, renewing it shortly before it
+// expires.
+func (d *downloader) accessToken(ctx context.Context) (string, error) {
+	d.tokenMu.Lock()
+	defer d.tokenMu.Unlock()
+	if d.token != "" && time.Now().Before(d.tokenExp) {
+		return d.token, nil
+	}
+	resp, err := d.get(ctx, d.tokenURL)
+	if err != nil {
+		return "", fmt.Errorf("get access token: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("get access token: HTTP %d", resp.StatusCode)
+	}
+	var t struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&t); err != nil {
+		return "", fmt.Errorf("get access token: %w", err)
+	}
+	if t.AccessToken == "" {
+		return "", errors.New("get access token: empty token")
+	}
+	d.token = t.AccessToken
+	d.tokenExp = time.Now().Add(time.Duration(t.ExpiresIn)*time.Second - 30*time.Second)
+	return d.token, nil
 }
 
 // errNotFound marks a 404, which retrying will not fix.
@@ -134,6 +176,9 @@ func (d *downloader) fetch(ctx context.Context, rawURL, wantType string) ([]byte
 		}
 		if errors.Is(err, errNotFound) || ctx.Err() != nil {
 			return nil, err
+		}
+		if attempt < d.retries {
+			d.retried.Add(1)
 		}
 		lastErr = err
 	}

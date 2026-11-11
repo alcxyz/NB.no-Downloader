@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,21 +20,41 @@ func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		if errors.Is(err, errAuth) {
-			fmt.Fprintln(os.Stderr, "Log in at www.nb.no, export fresh cookies and pass them with -cookie-file.")
+			fmt.Fprintln(os.Stderr, "If this item needs a login, run: nbdl login")
 		}
 		os.Exit(1)
 	}
 }
 
+const usage = `Usage:
+  nbdl login                 log in to nb.no in a dedicated browser window
+  nbdl logout                forget the saved nb.no login
+  nbdl [download] [flags] <book id | URN | nb.no URL>
+
+Download flags:
+`
+
 func run(args []string) error {
-	fs := flag.NewFlagSet("NB.no-Downloader", flag.ContinueOnError)
+	if len(args) > 0 {
+		switch args[0] {
+		case "login":
+			return login()
+		case "logout":
+			return logout()
+		case "download":
+			args = args[1:]
+		}
+	}
+
+	fs := flag.NewFlagSet("nbdl", flag.ContinueOnError)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: %s [flags] <book id | URN | nb.no URL>\n\nFlags:\n", fs.Name())
+		fmt.Fprint(fs.Output(), usage)
 		fs.PrintDefaults()
 	}
 	bookID := fs.String("id", "", "book id, URN or nb.no item URL (or pass it as the first argument)")
 	docType := fs.String("type", "digibok", "document type for a bare numeric id, such as digibok or pliktmonografi")
-	cookieFile := fs.String("cookie-file", "", "file with nb.no cookies (Cookie header or Netscape cookies.txt); - reads stdin")
+	cookieFile := fs.String("cookie-file", "", "read nb.no cookies from this file (Cookie header or Netscape cookies.txt; - reads stdin) instead of the login browser")
+	anonymous := fs.Bool("anonymous", false, "do not use the saved login")
 	width := fs.Int("width", 1200, "page image width in pixels; 0 downloads full resolution")
 	output := fs.String("o", "", "output PDF path (default <id>.pdf)")
 	workers := fs.Int("workers", 4, "number of pages to download in parallel")
@@ -60,12 +79,29 @@ func run(args []string) error {
 		return err
 	}
 
-	var cookies string
-	if *cookieFile != "" {
+	var cookies []*http.Cookie
+	switch {
+	case *cookieFile != "":
 		cookies, err = readCookies(*cookieFile)
 		if err != nil {
 			return err
 		}
+	case !*anonymous:
+		cookies, err = browserSession()
+		if err != nil {
+			return fmt.Errorf("read login from browser profile: %w", err)
+		}
+		if len(cookies) > 0 && !hasLogin(cookies) {
+			fmt.Fprintln(os.Stderr, "warning: the saved nb.no login has expired; run nbdl login to renew it")
+		}
+	}
+	loggedIn := hasLogin(cookies)
+	if loggedIn {
+		fmt.Fprintln(os.Stderr, "using nb.no login")
+	}
+	jar, err := newJar(cookies)
+	if err != nil {
+		return err
 	}
 
 	pdfPath := *output
@@ -78,12 +114,14 @@ func run(args []string) error {
 	defer stop()
 
 	d := &downloader{
-		client:     &http.Client{Timeout: 2 * time.Minute},
-		cookies:    cookies,
-		cookieHost: "nb.no",
+		client:     &http.Client{Jar: jar, Timeout: 2 * time.Minute},
+		authDomain: "nb.no",
 		manifest:   manifestBase,
 		retries:    15,
 		retryDelay: 250 * time.Millisecond,
+	}
+	if loggedIn {
+		d.tokenURL = tokenURL
 	}
 
 	book, err := d.fetchBook(ctx, identifier)
@@ -95,8 +133,8 @@ func run(args []string) error {
 		title = identifier
 	}
 	fmt.Fprintf(os.Stderr, "%s: %d pages\n", title, len(book.Pages))
-	if strings.Contains(identifier, "pliktmonografi") && cookies == "" {
-		fmt.Fprintln(os.Stderr, "warning: pliktmonografi items usually need login cookies (-cookie-file)")
+	if strings.Contains(identifier, "pliktmonografi") && !loggedIn {
+		fmt.Fprintln(os.Stderr, "warning: pliktmonografi items usually need a login (nbdl login)")
 	}
 
 	err = d.downloadPages(ctx, book, pagesDir, *width, *workers, func(done, total int) {
@@ -115,6 +153,9 @@ func run(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "saved %s\n", pdfPath)
+	if n := d.retried.Load(); n > 0 {
+		fmt.Fprintf(os.Stderr, "(%d requests were retried after transient errors)\n", n)
+	}
 
 	if !*keepPages {
 		return os.RemoveAll(pagesDir)
@@ -138,56 +179,4 @@ func savePDF(path, title string, pages []pdfPage) error {
 		return err
 	}
 	return os.Rename(tmp, path)
-}
-
-// readCookies loads nb.no cookies from a file holding either a browser
-// Cookie header value ("a=1; b=2") or a Netscape cookies.txt export, and
-// returns them as a Cookie header value.
-func readCookies(path string) (string, error) {
-	var data []byte
-	var err error
-	if path == "-" {
-		data, err = io.ReadAll(os.Stdin)
-	} else {
-		data, err = os.ReadFile(path)
-	}
-	if err != nil {
-		return "", fmt.Errorf("read cookie file: %w", err)
-	}
-	cookies := parseCookies(string(data))
-	if cookies == "" {
-		return "", errors.New("cookie file contains no cookies")
-	}
-	return cookies, nil
-}
-
-func parseCookies(text string) string {
-	text = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "Cookie:"))
-	var pairs []string
-	if strings.Contains(text, "\t") {
-		// Netscape format: domain, subdomains, path, secure, expiry, name, value.
-		for _, line := range strings.Split(text, "\n") {
-			line = strings.TrimRight(line, "\r")
-			line = strings.TrimPrefix(line, "#HttpOnly_")
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			f := strings.Split(line, "\t")
-			if len(f) != 7 {
-				continue
-			}
-			if !hostWithin(strings.TrimPrefix(f[0], "."), "nb.no") {
-				continue
-			}
-			pairs = append(pairs, f[5]+"="+f[6])
-		}
-		return strings.Join(pairs, "; ")
-	}
-	for _, part := range strings.Split(text, ";") {
-		part = strings.TrimSpace(part)
-		if name, _, ok := strings.Cut(part, "="); ok && name != "" {
-			pairs = append(pairs, part)
-		}
-	}
-	return strings.Join(pairs, "; ")
 }
