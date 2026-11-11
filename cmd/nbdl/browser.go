@@ -198,5 +198,14 @@ func logout() error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "removed", dir)
+	// Chromium keeps the disk cache of a profile under ~/.config/X in
+	// ~/.cache/X.
+	if config, err := os.UserConfigDir(); err == nil && os.Getenv("NBDL_PROFILE") == "" {
+		if cache, err := os.UserCacheDir(); err == nil {
+			if rel, err := filepath.Rel(config, dir); err == nil {
+				os.RemoveAll(filepath.Join(cache, rel))
+			}
+		}
+	}
 	return nil
 }
