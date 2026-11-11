@@ -1,416 +1,193 @@
+// Command NB.no-Downloader downloads a book from the Norwegian National
+// Library (Nasjonalbiblioteket, nb.no) and saves it as a PDF.
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
-	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"strconv"
 	"strings"
-
-	"github.com/jung-kurt/gofpdf"
+	"syscall"
+	"time"
 )
 
-// Book represents a book to be downloaded
-type Book struct {
-	id           string
-	length       int
-	retry        int
-	path         string
-	fullpath     string
-	urlTemplate  string
-	client       *http.Client
-	documentType string // "digibok" or "pliktmonografi"
-	params       map[string]string
-}
-
-// NewBook creates a new Book instance
-func NewBook(bookID string, length int, docType string, cookies []*http.Cookie) *Book {
-	// Default to digibok if not specified
-	if docType == "" {
-		docType = "digibok"
-	}
-
-	// Create cookie jar to maintain session
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{
-		Jar: jar,
-	}
-
-	// Direct image URL template based on browser requests
-	urlTemplate := "https://www.nb.no/services/image/resolver/URN:NBN:no-nb_{docType}_{book_id}_{long_page_nr}/full/602,/0/default.jpg"
-	urlTemplate = strings.Replace(urlTemplate, "{docType}", docType, 1)
-
-	b := &Book{
-		id:     bookID,
-		length: length,
-		retry:  2,
-		params: map[string]string{
-			"book_id":      bookID,
-			"page_nr":      "1",
-			"long_page_nr": "0001",
-		},
-		path:         bookID + "_temp_image_folder",
-		urlTemplate:  urlTemplate,
-		client:       client,
-		documentType: docType,
-	}
-
-	// Set authentication cookies if provided
-	if len(cookies) > 0 {
-		baseURL, _ := url.Parse("https://www.nb.no")
-		b.client.Jar.SetCookies(baseURL, cookies)
-	}
-
-	execPath, err := os.Executable()
-	if err == nil {
-		b.fullpath = filepath.Join(filepath.Dir(execPath), b.path)
-	} else {
-		b.fullpath = b.path
-	}
-
-	if _, err := os.Stat(b.fullpath); os.IsNotExist(err) {
-		os.Mkdir(b.path, 0755)
-	}
-
-	return b
-}
-
-// formatURL replaces template placeholders with actual values
-func (b *Book) formatURL() string {
-	url := b.urlTemplate
-	for key, value := range b.params {
-		url = strings.Replace(url, "{"+key+"}", value, -1)
-	}
-	return url
-}
-
-// downloadPage downloads a single page directly
-func (b *Book) downloadPage(pageNr string, retry int) {
-	b.updateParams(pageNr)
-	url := b.formatURL()
-
-	fmt.Printf("Downloading page %s: %s\n", pageNr, url)
-
-	resp, err := b.client.Get(url)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		fmt.Printf("Download Error: HTTP Status %d\n", resp.StatusCode)
-		fmt.Println("Tried to access " + url)
-
-		if resp != nil && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
-			fmt.Println("Authentication failed - check your cookies.")
-			fmt.Println("Try using -cookie-file or -cookies with valid authentication.")
-			dumpCookies(b.client, "https://www.nb.no")
-		}
-
-		if b.retry >= 0 {
-			fmt.Printf("Retrying.... %d tries remaining.\n", b.retry)
-			b.retry--
-			b.downloadPage(pageNr, retry) // Recursively retry
-		} else {
-			fmt.Println("All retries failed")
-		}
-		if resp != nil {
-			resp.Body.Close()
-		}
-		return
-	}
-
-	// Download successful, save the image
-	imgData, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		fmt.Println("Error reading response:", err)
-		return
-	}
-
-	// Save the image directly
-	outPath := filepath.Join(b.path, pageNr+".jpg")
-	outFile, err := os.Create(outPath)
-	if err != nil {
-		fmt.Println("Error creating output file:", err)
-		return
-	}
-	defer outFile.Close()
-
-	_, err = outFile.Write(imgData)
-	if err != nil {
-		fmt.Println("Error writing image file:", err)
-		return
-	}
-
-	fmt.Printf("Page %s downloaded successfully\n", pageNr)
-	b.retry = 2 // Reset retry count for next page
-}
-
-// dumpCookies prints the current cookies in the client jar (for debugging)
-func dumpCookies(client *http.Client, urlStr string) {
-	if client.Jar == nil {
-		fmt.Println("No cookie jar available")
-		return
-	}
-
-	parsedURL, err := url.Parse(urlStr)
-	if err != nil {
-		fmt.Println("Error parsing URL for cookie dump:", err)
-		return
-	}
-
-	cookies := client.Jar.Cookies(parsedURL)
-	if len(cookies) == 0 {
-		fmt.Println("No cookies found in jar")
-		return
-	}
-
-	fmt.Println("Current cookies in jar:")
-	for _, cookie := range cookies {
-		fmt.Printf("  %s = %s\n", cookie.Name, cookie.Value)
-	}
-}
-
-// findBookLength attempts to determine the book's length
-func (b *Book) findBookLength() int {
-	delta := 100
-	j := 100
-
-	for {
-		b.updateParams(strconv.Itoa(j))
-		url := b.formatURL()
-
-		resp, err := b.client.Get(url)
-		if err != nil || resp.StatusCode != http.StatusOK {
-			// Too far
-			if delta == 1 {
-				return j - 1
-			}
-			j -= delta
-			delta = delta / 10
-			if delta < 1 {
-				delta = 1
-			}
-			j += delta
-		} else {
-			resp.Body.Close()
-			j += delta
-		}
-	}
-}
-
-// downloadBook downloads all pages and creates a PDF
-func (b *Book) downloadBook() {
-	// Create PDF
-	pdf := gofpdf.New("P", "mm", "Letter", "")
-
-	if b.length == 0 {
-		fmt.Println("Length not specified, calculating book length")
-		b.length = b.findBookLength()
-		fmt.Println("Book length found:", b.length)
-	}
-
-	fmt.Printf("Downloading book %s (type: %s)\n", b.id, b.documentType)
-
-	// Front Cover
-	b.downloadPage("C1", b.retry)
-
-	// Check for Introduction pages (I1, I2, etc.)
-	introPageNum := 1
-	for {
-		introPage := fmt.Sprintf("I%d", introPageNum)
-		tempRetry := b.retry
-
-		b.updateParams(introPage)
-		url := b.formatURL()
-
-		resp, err := b.client.Head(url)
-		if err != nil || resp.StatusCode != http.StatusOK {
-			if resp != nil {
-				resp.Body.Close()
-			}
-			break
-		}
-		resp.Body.Close()
-
-		// The page exists, download it
-		b.downloadPage(introPage, tempRetry)
-		introPageNum++
-	}
-
-	// Download all numbered pages
-	for page := 1; page <= b.length; page++ {
-		pageStr := strconv.Itoa(page)
-		b.downloadPage(pageStr, b.retry)
-	}
-
-	// Back Cover
-	b.downloadPage("C3", b.retry)
-
-	// Now create the PDF
-	fmt.Println("Creating PDF...")
-
-	// Add front cover
-	pdfPath := filepath.Join(b.path, "C1.jpg")
-	if _, err := os.Stat(pdfPath); err == nil {
-		pdf.AddPage()
-		pdf.Image(pdfPath, 0, 0, 210, 297, false, "", 0, "")
-	}
-
-	// Add intro pages
-	for i := 1; i <= introPageNum-1; i++ {
-		introPage := fmt.Sprintf("I%d", i)
-		pdfPath := filepath.Join(b.path, introPage+".jpg")
-		if _, err := os.Stat(pdfPath); err == nil {
-			pdf.AddPage()
-			pdf.Image(pdfPath, 0, 0, 210, 297, false, "", 0, "")
-		}
-	}
-
-	// Add all numbered pages
-	for page := 1; page <= b.length; page++ {
-		pageStr := strconv.Itoa(page)
-		pdfPath := filepath.Join(b.path, pageStr+".jpg")
-		if _, err := os.Stat(pdfPath); err == nil {
-			pdf.AddPage()
-			pdf.Image(pdfPath, 0, 0, 210, 297, false, "", 0, "")
-		}
-	}
-
-	// Add back cover
-	pdfPath = filepath.Join(b.path, "C3.jpg")
-	if _, err := os.Stat(pdfPath); err == nil {
-		pdf.AddPage()
-		pdf.Image(pdfPath, 0, 0, 210, 297, false, "", 0, "")
-	}
-
-	// Save the PDF
-	err := pdf.OutputFileAndClose(b.id + ".pdf")
-	if err != nil {
-		fmt.Println("Error saving PDF:", err)
-		return
-	}
-	fmt.Println("PDF saved of book", b.id)
-}
-
-// updateParams updates the request parameters
-func (b *Book) updateParams(pageNr string) {
-	if pageNr != "" {
-		b.params["page_nr"] = pageNr
-		if _, err := strconv.Atoi(pageNr); err == nil {
-			// If pageNr is a number, pad it with zeros
-			b.params["long_page_nr"] = fmt.Sprintf("%04s", pageNr)
-		} else {
-			b.params["long_page_nr"] = pageNr
-		}
-	}
-}
-
-// parseCookiesString parses a cookie string into http.Cookie objects
-func parseCookiesString(cookiesStr string) []*http.Cookie {
-	var cookies []*http.Cookie
-
-	if cookiesStr == "" {
-		return cookies
-	}
-
-	cookiePairs := strings.Split(cookiesStr, ";")
-	for _, pair := range cookiePairs {
-		pair = strings.TrimSpace(pair)
-		if pair == "" {
-			continue
-		}
-		parts := strings.SplitN(pair, "=", 2)
-		if len(parts) == 2 {
-			cookies = append(cookies, &http.Cookie{
-				Name:  parts[0],
-				Value: parts[1],
-				Path:  "/", // Set path to root
-			})
-		}
-	}
-
-	return cookies
-}
-
-// readCookiesFromFile reads cookies from a file
-func readCookiesFromFile(filepath string) (string, error) {
-	data, err := os.ReadFile(filepath)
-	if err != nil {
-		return "", fmt.Errorf("error reading cookie file: %w", err)
-	}
-
-	return strings.TrimSpace(string(data)), nil
-}
-
 func main() {
-	// Define command-line flags
-	bookID := flag.String("id", "", "Book ID to download")
-	docType := flag.String("type", "digibok", "Document type: 'digibok' or 'pliktmonografi'")
-	cookiesStr := flag.String("cookies", "", "Authentication cookies in 'name1=value1; name2=value2' format")
-	cookieFile := flag.String("cookie-file", "", "Path to file containing authentication cookies")
-	bookLength := flag.Int("length", 0, "Book length (will calculate if not provided)")
-	imageWidth := flag.Int("width", 602, "Image width to request (default is 602px)")
-
-	flag.Parse()
-
-	// Check for required book ID
-	if *bookID == "" {
-		// Check if book ID was provided as a positional argument
-		if flag.NArg() > 0 {
-			*bookID = flag.Arg(0)
-		} else {
-			fmt.Println("Please provide a book ID with -id flag or as first argument")
-			flag.Usage()
-			os.Exit(1)
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		if errors.Is(err, errAuth) {
+			fmt.Fprintln(os.Stderr, "Log in at www.nb.no, export fresh cookies and pass them with -cookie-file.")
 		}
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	fs := flag.NewFlagSet("NB.no-Downloader", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: %s [flags] <book id | URN | nb.no URL>\n\nFlags:\n", fs.Name())
+		fs.PrintDefaults()
+	}
+	bookID := fs.String("id", "", "book id, URN or nb.no item URL (or pass it as the first argument)")
+	docType := fs.String("type", "digibok", "document type for a bare numeric id, such as digibok or pliktmonografi")
+	cookieFile := fs.String("cookie-file", "", "file with nb.no cookies (Cookie header or Netscape cookies.txt); - reads stdin")
+	width := fs.Int("width", 1200, "page image width in pixels; 0 downloads full resolution")
+	output := fs.String("o", "", "output PDF path (default <id>.pdf)")
+	workers := fs.Int("workers", 4, "number of pages to download in parallel")
+	keepPages := fs.Bool("keep-pages", false, "keep the downloaded page images after creating the PDF")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
 	}
 
-	// Parse cookies - prioritize file over direct string
-	var cookies []*http.Cookie
-	var cookieInput string
+	input := *bookID
+	if input == "" {
+		if fs.NArg() == 0 {
+			fs.Usage()
+			return errors.New("missing book id")
+		}
+		input = fs.Arg(0)
+	}
+	identifier, err := resolveIdentifier(input, *docType)
+	if err != nil {
+		return err
+	}
 
+	var cookies string
 	if *cookieFile != "" {
-		// Read cookies from file
-		fileContent, err := readCookiesFromFile(*cookieFile)
+		cookies, err = readCookies(*cookieFile)
 		if err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+			return err
 		}
-		cookieInput = fileContent
-		fmt.Printf("Read cookies from file: %s\n", *cookieFile)
-	} else if *cookiesStr != "" {
-		// Use cookies from command line argument
-		cookieInput = *cookiesStr
-		fmt.Println("Using cookies from command line argument")
 	}
 
-	if cookieInput != "" {
-		cookies = parseCookiesString(cookieInput)
-		fmt.Printf("Using %d cookies for authentication\n", len(cookies))
+	pdfPath := *output
+	if pdfPath == "" {
+		pdfPath = outputStem(input, identifier) + ".pdf"
+	}
+	pagesDir := strings.TrimSuffix(pdfPath, filepath.Ext(pdfPath)) + "_pages"
 
-		// Print cookie names for debugging
-		cookieNames := make([]string, len(cookies))
-		for i, cookie := range cookies {
-			cookieNames[i] = cookie.Name
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	d := &downloader{
+		client:     &http.Client{Timeout: 2 * time.Minute},
+		cookies:    cookies,
+		cookieHost: "nb.no",
+		manifest:   manifestBase,
+		retries:    15,
+		retryDelay: 250 * time.Millisecond,
+	}
+
+	book, err := d.fetchBook(ctx, identifier)
+	if err != nil {
+		return err
+	}
+	title := book.Title
+	if title == "" {
+		title = identifier
+	}
+	fmt.Fprintf(os.Stderr, "%s: %d pages\n", title, len(book.Pages))
+	if strings.Contains(identifier, "pliktmonografi") && cookies == "" {
+		fmt.Fprintln(os.Stderr, "warning: pliktmonografi items usually need login cookies (-cookie-file)")
+	}
+
+	err = d.downloadPages(ctx, book, pagesDir, *width, *workers, func(done, total int) {
+		fmt.Fprintf(os.Stderr, "\rdownloaded %d/%d pages", done, total)
+	})
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return fmt.Errorf("%w (downloaded pages are kept in %s; run again to resume)", err, pagesDir)
+	}
+
+	pages := make([]pdfPage, len(book.Pages))
+	for i, p := range book.Pages {
+		pages[i] = pdfPage{Path: pageFile(pagesDir, i), InchesPerPixel: p.InchesPerPixel, OriginalWidth: p.Width}
+	}
+	if err := savePDF(pdfPath, book.Title, pages); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "saved %s\n", pdfPath)
+
+	if !*keepPages {
+		return os.RemoveAll(pagesDir)
+	}
+	return nil
+}
+
+func savePDF(path, title string, pages []pdfPage) error {
+	tmp := path + ".part"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return err
+	}
+	if err := writePDF(f, title, pages); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write PDF: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// readCookies loads nb.no cookies from a file holding either a browser
+// Cookie header value ("a=1; b=2") or a Netscape cookies.txt export, and
+// returns them as a Cookie header value.
+func readCookies(path string) (string, error) {
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return "", fmt.Errorf("read cookie file: %w", err)
+	}
+	cookies := parseCookies(string(data))
+	if cookies == "" {
+		return "", errors.New("cookie file contains no cookies")
+	}
+	return cookies, nil
+}
+
+func parseCookies(text string) string {
+	text = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "Cookie:"))
+	var pairs []string
+	if strings.Contains(text, "\t") {
+		// Netscape format: domain, subdomains, path, secure, expiry, name, value.
+		for _, line := range strings.Split(text, "\n") {
+			line = strings.TrimRight(line, "\r")
+			line = strings.TrimPrefix(line, "#HttpOnly_")
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			f := strings.Split(line, "\t")
+			if len(f) != 7 {
+				continue
+			}
+			if !hostWithin(strings.TrimPrefix(f[0], "."), "nb.no") {
+				continue
+			}
+			pairs = append(pairs, f[5]+"="+f[6])
 		}
-		fmt.Printf("Cookie names: %s\n", strings.Join(cookieNames, ", "))
+		return strings.Join(pairs, "; ")
 	}
-
-	// Warn if trying to download pliktmonografi without cookies
-	if *docType == "pliktmonografi" && len(cookies) == 0 {
-		fmt.Println("WARNING: pliktmonografi documents typically require authentication.")
-		fmt.Println("If download fails, please provide authentication cookies with -cookie-file or -cookies flag.")
+	for _, part := range strings.Split(text, ";") {
+		part = strings.TrimSpace(part)
+		if name, _, ok := strings.Cut(part, "="); ok && name != "" {
+			pairs = append(pairs, part)
+		}
 	}
-
-	b := NewBook(*bookID, *bookLength, *docType, cookies)
-
-	// Update image width in URL template if specified
-	if *imageWidth != 602 {
-		b.urlTemplate = strings.Replace(b.urlTemplate, "602,", fmt.Sprintf("%d,", *imageWidth), 1)
-		fmt.Printf("Using custom image width: %dpx\n", *imageWidth)
-	}
-
-	b.downloadBook()
+	return strings.Join(pairs, "; ")
 }
