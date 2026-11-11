@@ -59,9 +59,10 @@ func run(args []string) error {
 	cookieFile := fs.String("cookie-file", "", "read nb.no cookies from this file (Cookie header or Netscape cookies.txt; - reads stdin) instead of the login browser")
 	anonymous := fs.Bool("anonymous", false, "do not use the saved login")
 	width := fs.Int("width", 1200, "page image width in pixels; 0 downloads full resolution")
-	output := fs.String("o", "", "output PDF path (default <id>.pdf)")
+	format := fs.String("format", "epub", "output format: epub (text recognised from the scans) or pdf (the scans)")
+	output := fs.String("o", "", "output file (default <id>.epub or <id>.pdf)")
 	workers := fs.Int("workers", 4, "number of pages to download in parallel")
-	keepPages := fs.Bool("keep-pages", false, "keep the downloaded page images after creating the PDF")
+	keepPages := fs.Bool("keep-pages", false, "keep the downloaded pages and recognised text after converting")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -107,9 +108,8 @@ func run(args []string) error {
 		return err
 	}
 
-	pdfPath := *output
-	if pdfPath == "" {
-		pdfPath = outputStem(input, identifier) + ".pdf"
+	if *format != "epub" && *format != "pdf" {
+		return fmt.Errorf("unknown format %q: use epub or pdf", *format)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -128,15 +128,31 @@ func run(args []string) error {
 		fmt.Fprintln(os.Stderr, "warning: pliktmonografi items usually need a login (nbdl login)")
 	}
 
-	opts := saveOptions{width: *width, workers: *workers, keepPages: *keepPages}
-	err = saveBook(ctx, d, book, pdfPath, opts, func(done, total int) {
-		fmt.Fprintf(os.Stderr, "\rdownloaded %d/%d pages", done, total)
+	outPath := *output
+	if outPath == "" {
+		stem := outputStem(input, identifier)
+		if book.URN != "" && stem != input {
+			stem = outputStem(book.URN, book.URN)
+		}
+		outPath = stem + "." + *format
+	}
+
+	opts := saveOptions{format: *format, width: *width, workers: *workers, keepPages: *keepPages}
+	phase := ""
+	err = convertBook(ctx, d, book, identifier, outPath, opts, func(p string, done, total int) {
+		if p != phase {
+			if phase != "" {
+				fmt.Fprintln(os.Stderr)
+			}
+			phase = p
+		}
+		fmt.Fprintf(os.Stderr, "\r%s %d/%d", p, done, total)
 	})
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "saved %s\n", pdfPath)
+	fmt.Fprintf(os.Stderr, "saved %s\n", outPath)
 	if n := d.retried.Load(); n > 0 {
 		fmt.Fprintf(os.Stderr, "(%d requests were retried after transient errors)\n", n)
 	}
@@ -164,8 +180,19 @@ func newDownloader(cookies []*http.Cookie) (*downloader, error) {
 }
 
 type saveOptions struct {
+	format         string // "epub" or "pdf"
 	width, workers int
 	keepPages      bool
+}
+
+// convertBook saves book in the format opts asks for.
+func convertBook(ctx context.Context, d *downloader, book *Book, identifier, outPath string, opts saveOptions, progress progressFunc) error {
+	if opts.format == "pdf" {
+		return saveBook(ctx, d, book, outPath, opts, func(done, total int) {
+			progress("Downloading pages", done, total)
+		})
+	}
+	return saveEPUB(ctx, d, book, identifier, outPath, opts, progress)
 }
 
 // saveBook downloads every page of book next to pdfPath and writes the PDF.

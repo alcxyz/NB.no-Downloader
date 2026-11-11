@@ -28,6 +28,13 @@
           packages = [
             pkgs.go
             pkgs.gopls
+            pkgs.epubcheck
+            (pkgs.tesseract.override {
+              enableLanguages = [
+                "nor"
+                "eng"
+              ];
+            })
           ]
           ++ pkgs.lib.optional pkgs.stdenv.isLinux pkgs.chromium;
         };

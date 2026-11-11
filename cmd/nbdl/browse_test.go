@@ -17,7 +17,7 @@ func TestBookFileName(t *testing.T) {
 		{"", "URN:NBN:no-nb_digibok_1", "digibok_1.pdf"},
 	}
 	for _, tt := range tests {
-		if got := bookFileName(tt.title, tt.id); got != tt.want {
+		if got := bookFileName(tt.title, tt.id, "pdf"); got != tt.want {
 			t.Errorf("bookFileName(%q, %q) = %q, want %q", tt.title, tt.id, got, tt.want)
 		}
 	}
@@ -49,7 +49,7 @@ func TestBrowseEndToEnd(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() {
 		errc <- runBrowse(ctx, b, first, "https://www.nb.no/items/URN:NBN:no-nb_digibok_2020062548675",
-			dir, saveOptions{width: 300, workers: 4})
+			dir, saveOptions{format: "pdf", width: 300, workers: 4})
 	}()
 
 	page := first.Timeout(2 * time.Minute)

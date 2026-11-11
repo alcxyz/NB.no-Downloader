@@ -1,13 +1,12 @@
 # NB.no Downloader
 
 `nbdl` downloads a book from the Norwegian National Library
-([nb.no](https://www.nb.no), Nasjonalbiblioteket) and saves it as a PDF.
+([nb.no](https://www.nb.no), Nasjonalbiblioteket) and saves it as an EPUB
+with real, reflowable text, or as a PDF of the scanned pages.
 
-It reads the book's page list from nb.no's IIIF manifest, downloads the pages
-in parallel and writes them into a PDF sized from the original scans. `nbdl`
-keeps its own browser for nb.no: you log in there once with BankID (or any
-other nb.no login), find books as usual and click a download button, or paste
-a book's address on the command line.
+`nbdl` keeps its own browser for nb.no: you log in there once with BankID (or
+any other nb.no login), find books as usual and click a download button, or
+paste a book's address on the command line.
 
 This is a Go rewrite of [akselsd/NB.no-Downloader](https://github.com/akselsd/NB.no-Downloader);
 the original Python script is kept in [`archived/`](archived/).
@@ -21,7 +20,7 @@ nix run github:alcxyz/NB.no-Downloader -- <book>
 nix profile install github:alcxyz/NB.no-Downloader
 ```
 
-The Nix package brings its own Chromium for the login.
+The Nix package brings its own Chromium and Tesseract.
 
 With Go 1.23 or newer:
 
@@ -29,10 +28,12 @@ With Go 1.23 or newer:
 go install github.com/alcxyz/NB.no-Downloader/cmd/nbdl@latest
 ```
 
-The login needs a Chromium-based browser. `nbdl` uses `$NBDL_BROWSER` if set,
-then an installed Google Chrome, Chromium or Microsoft Edge, and otherwise
-downloads a Chromium build into its cache. That downloaded build does not run
-on NixOS; use the Nix package or set `NBDL_BROWSER` there.
+The login, the browser and the built-in text recognition need a
+Chromium-based browser. `nbdl` uses `$NBDL_BROWSER` if set, then an installed
+Google Chrome, Chromium or Microsoft Edge, and otherwise downloads a Chromium
+build into its cache. That downloaded build does not run on NixOS; use the Nix
+package or set `NBDL_BROWSER` there. Nothing else needs installing; see
+[EPUB](#epub) for the optional Tesseract.
 
 ## Usage
 
@@ -43,15 +44,15 @@ nbdl browse
 ```
 
 This opens nb.no in `nbdl`'s own browser window. Log in there if you need
-to, search and open books as usual, and click **Download PDF** in the corner
+to, search and open books as usual, and click **Download EPUB** in the corner
 of a book's page. The button shows the progress; you can keep browsing and
-queue more books, which are downloaded one at a time. PDFs are saved in
+queue more books, which are downloaded one at a time. Books are saved in
 `~/Downloads` (or the current folder if there is none), named after the book's
 title; `-dir` picks another folder. Close the window to quit; queued books
 still finish.
 
-`browse` takes the `-width`, `-workers` and `-keep-pages` options described
-below.
+`browse` takes the `-format`, `-width`, `-workers` and `-keep-pages` options
+described below.
 
 ### From the command line
 
@@ -67,8 +68,38 @@ nbdl <book>
 - a bare id with its type: `nbdl -type pliktmonografi 000040863`
   (the type defaults to `digibok`)
 
-The PDF is written to `<id>.pdf` in the current directory, or to the path given
-with `-o`.
+The book is written to `<id>.epub` (or `<id>.pdf` with `-format pdf`) in the
+current directory, or to the path given with `-o`.
+
+### EPUB
+
+An EPUB needs the book's text, which nb.no has only as images. `nbdl` gets it
+in one of two ways:
+
+- For books nb.no publishes the recognised text of (mostly books in the public
+  domain), it uses nb.no's own text.
+- For other books it recognises the text itself from the full-resolution
+  scans. It uses [Tesseract](https://github.com/tesseract-ocr/tesseract) when
+  it is installed with Norwegian (`nor`) or English data, which is fastest.
+  Otherwise it runs Tesseract compiled to WebAssembly
+  ([tesseract.js](https://github.com/naptha/tesseract.js)) in a hidden
+  browser; the first time, it downloads about 7 MB of program and language
+  files, checks them against pinned checksums and keeps them in its cache.
+
+`nbdl` then rebuilds the book: paragraphs flow across pages, words hyphenated
+at line ends are joined, running heads and page numbers are dropped, headings
+and chapters are found (including chapters numbered I, II, III), charts and
+illustrations are cut out of the scans as pictures, and title pages and
+picture pages are kept as images. The front cover becomes the cover.
+
+The EPUB carries nb.no's catalogue data: title and subtitle, authors, ISBN,
+publisher, year, language, subjects and summary, so e-book managers such as
+Calibre fill in their fields on import.
+
+Recognised text is never perfect. Modern print comes out very well; old
+Gothic type, tables, footnotes and complex layouts less so, and a chapter
+heading or chart title is sometimes taken for the other. Use `-format pdf`
+when the layout matters more than reflowing text.
 
 ### Logging in
 
@@ -102,20 +133,22 @@ Without a browser, `-cookie-file` reads nb.no cookies from a file, either a
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-o` | `<id>.pdf` | Output PDF path |
-| `-width` | `1200` | Page image width in pixels; `0` downloads full resolution |
+| `-format` | `epub` | `epub` for recognised text, `pdf` for the page scans |
+| `-o` | `<id>.epub` | Output file |
+| `-width` | `1200` | Width in pixels of PDF pages and EPUB pictures; `0` downloads full resolution |
 | `-type` | `digibok` | Document type for a bare numeric id |
 | `-workers` | `4` | Pages downloaded in parallel |
-| `-keep-pages` | off | Keep the page images after creating the PDF |
+| `-keep-pages` | off | Keep the downloaded pages and recognised text afterwards |
 | `-anonymous` | off | Do not use the saved login |
 | `-cookie-file` | | Read cookies from a file instead of the login browser |
 
 ### Interrupted downloads
 
-Pages are saved in `<output>_pages/` while downloading. If a download fails or
-you stop it, run the same command again: pages already on disk are kept and
-only the rest are fetched. The folder is removed once the PDF is written,
-unless `-keep-pages` is set.
+Pages and recognised text are saved next to the output (`<name>_work/` for an
+EPUB, `<name>_pages/` for a PDF) while `nbdl` works. If a download fails or
+you stop it, run the same command again: what is already on disk is kept and
+only the rest is fetched or recognised. The folder is removed once the book is
+written, unless `-keep-pages` is set.
 
 nb.no rejects a large share of image requests for Norway-only books with a
 `403` at random, logged in or not, so `nbdl` retries each page several times
@@ -125,7 +158,7 @@ is reported as an access problem.
 ## Development
 
 ```bash
-nix develop   # Go, gopls and Chromium
+nix develop   # Go, gopls, Chromium, Tesseract and epubcheck
 go test ./...
 NBDL_E2E=1 go test ./cmd/nbdl   # also clicks the button on nb.no in a headless browser
 ```

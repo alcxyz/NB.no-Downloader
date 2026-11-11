@@ -36,6 +36,7 @@ var errAuth = errors.New("access denied (401/403): check your login")
 
 // Page is one canvas of a book, in reading order.
 type Page struct {
+	ID      string // e.g. URN:NBN:no-nb_digibok_2008010300041_0001
 	Label   string
 	Service string // IIIF image service base URL
 	Width   int    // full-resolution width in pixels
@@ -47,6 +48,7 @@ type Page struct {
 // Book is the parsed IIIF manifest of an item.
 type Book struct {
 	Title string
+	URN   string // from the page ids, e.g. URN:NBN:no-nb_digibok_2008010300041
 	Pages []Page
 }
 
@@ -91,6 +93,8 @@ type downloader struct {
 	client     *http.Client
 	authDomain string // the access token goes only to this domain
 	manifest   string // manifest URL; overridable in tests
+	catalog    string // catalogue record URL; overridable in tests
+	alto       string // ALTO text URL; overridable in tests
 	retries    int
 	retryDelay time.Duration
 
@@ -155,6 +159,9 @@ func (d *downloader) accessToken(ctx context.Context) (string, error) {
 // errNotFound marks a 404, which retrying will not fix.
 var errNotFound = errors.New("not found")
 
+// errUnauthorized is a 401: unlike nb.no's random 403s it is final.
+var errUnauthorized = fmt.Errorf("%w (401)", errAuth)
+
 // fetch GETs rawURL and returns the body, retrying transient failures.
 // nb.no intermittently answers valid requests with 403, sometimes as an HTML
 // error page with status 200, so 403s and responses of the wrong content
@@ -174,7 +181,7 @@ func (d *downloader) fetch(ctx context.Context, rawURL, wantType string) ([]byte
 		if err == nil {
 			return body, nil
 		}
-		if errors.Is(err, errNotFound) || ctx.Err() != nil {
+		if errors.Is(err, errNotFound) || errors.Is(err, errUnauthorized) || ctx.Err() != nil {
 			return nil, err
 		}
 		if attempt < d.retries {
@@ -197,7 +204,9 @@ func (d *downloader) tryFetch(ctx context.Context, rawURL, wantType string) ([]b
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return nil, fmt.Errorf("%w: %s", errNotFound, rawURL)
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case resp.StatusCode == http.StatusUnauthorized:
+		return nil, errUnauthorized
+	case resp.StatusCode == http.StatusForbidden:
 		return nil, errAuth
 	case resp.StatusCode != http.StatusOK:
 		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, rawURL)
@@ -256,9 +265,11 @@ func parseManifest(r io.Reader) (*Book, error) {
 			return nil, fmt.Errorf("manifest canvas %d has no image service", i+1)
 		}
 		svc := c.Images[0].Resource.Service
+		service := strings.TrimSuffix(svc.ID, "/")
 		p := Page{
+			ID:      service[strings.LastIndex(service, "/")+1:],
 			Label:   labelString(c.Label),
-			Service: strings.TrimSuffix(svc.ID, "/"),
+			Service: service,
 			Width:   c.Width,
 			Height:  c.Height,
 		}
@@ -274,6 +285,9 @@ func parseManifest(r io.Reader) (*Book, error) {
 	}
 	if len(book.Pages) == 0 {
 		return nil, errors.New("manifest lists no pages")
+	}
+	if id := book.Pages[0].ID; strings.HasPrefix(id, "URN:NBN:") && strings.Contains(id, "_") {
+		book.URN = id[:strings.LastIndex(id, "_")]
 	}
 	return book, nil
 }
@@ -320,6 +334,21 @@ func (d *downloader) downloadPages(ctx context.Context, book *Book, dir string, 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
+	return parallel(ctx, len(book.Pages), workers, progress, func(ctx context.Context, i int) error {
+		path := pageFile(dir, i)
+		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
+			return nil
+		}
+		if err := d.downloadPage(ctx, imageURL(book.Pages[i], width), path); err != nil {
+			return fmt.Errorf("page %d (%s): %w", i+1, book.Pages[i].Label, err)
+		}
+		return nil
+	})
+}
+
+// parallel runs fn for 0..n-1 on a pool of workers and stops at the first
+// error.
+func parallel(ctx context.Context, n, workers int, progress func(done, total int), fn func(ctx context.Context, i int) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -342,34 +371,22 @@ func (d *downloader) downloadPages(ctx context.Context, book *Book, dir string, 
 		}
 		done++
 		if progress != nil {
-			progress(done, len(book.Pages))
+			progress(done, n)
 		}
 	}
 
-	if workers < 1 {
-		workers = 1
-	}
-	for w := 0; w < workers; w++ {
+	for w := 0; w < max(workers, 1); w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				path := pageFile(dir, i)
-				if info, err := os.Stat(path); err == nil && info.Size() > 0 {
-					finish(nil)
-					continue
-				}
-				err := d.downloadPage(ctx, imageURL(book.Pages[i], width), path)
-				if err != nil {
-					err = fmt.Errorf("page %d (%s): %w", i+1, book.Pages[i].Label, err)
-				}
-				finish(err)
+				finish(fn(ctx, i))
 			}
 		}()
 	}
 
 feed:
-	for i := range book.Pages {
+	for i := 0; i < n; i++ {
 		select {
 		case jobs <- i:
 		case <-ctx.Done():

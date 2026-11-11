@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,6 +26,11 @@ const startURL = "https://www.nb.no/"
 // bindingName is the function the page calls to ask nbdl for a download.
 // It goes over the DevTools connection, so nb.no never sees it.
 const bindingName = "nbdlDownload"
+
+// buttonScript is buttonJS with the button's label filled in.
+func buttonScript(format string) string {
+	return strings.Replace(buttonJS, "NBDL_LABEL", strconv.Quote("Download "+strings.ToUpper(format)), 1)
+}
 
 // buttonJS adds a download button to nb.no item pages. nb.no is a single
 // page app, so it checks the address periodically instead of on load.
@@ -59,7 +65,7 @@ const buttonJS = `(() => {
     if (!btn.isConnected) document.body.appendChild(btn);
     const s = state[key];
     btn.style.display = "";
-    btn.textContent = s ? s.text : "Download PDF";
+    btn.textContent = s ? s.text : NBDL_LABEL;
     btn.disabled = !!(s && !s.done);
     btn.style.opacity = btn.disabled ? "0.85" : "1";
     btn.style.cursor = btn.disabled ? "default" : "pointer";
@@ -89,7 +95,8 @@ func browse(args []string) error {
 	dir := fs.String("dir", defaultDownloadDir(), "folder to save PDFs in")
 	width := fs.Int("width", 1200, "page image width in pixels; 0 downloads full resolution")
 	workers := fs.Int("workers", 4, "number of pages to download in parallel")
-	keepPages := fs.Bool("keep-pages", false, "keep the downloaded page images after creating each PDF")
+	format := fs.String("format", "epub", "output format: epub (text recognised from the scans) or pdf (the scans)")
+	keepPages := fs.Bool("keep-pages", false, "keep the downloaded pages and recognised text after converting")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -102,7 +109,10 @@ func browse(args []string) error {
 	if err := os.MkdirAll(*dir, 0o755); err != nil {
 		return err
 	}
-	opts := saveOptions{width: *width, workers: *workers, keepPages: *keepPages}
+	if *format != "epub" && *format != "pdf" {
+		return fmt.Errorf("unknown format %q: use epub or pdf", *format)
+	}
+	opts := saveOptions{format: *format, width: *width, workers: *workers, keepPages: *keepPages}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -118,7 +128,7 @@ func browse(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Browse nb.no in the browser window; open a book and click \"Download PDF\".\n")
+	fmt.Fprintf(os.Stderr, "Browse nb.no in the browser window; open a book and click \"Download %s\".\n", strings.ToUpper(*format))
 	fmt.Fprintf(os.Stderr, "PDFs are saved in %s. Close the browser window to quit.\n", *dir)
 	return runBrowse(ctx, b, first, startURL, *dir, opts)
 }
@@ -157,10 +167,11 @@ func runBrowse(ctx context.Context, b *rod.Browser, first *rod.Page, url, dir st
 		if err := (proto.RuntimeAddBinding{Name: bindingName}).Call(p); err != nil {
 			return
 		}
-		if _, err := p.EvalOnNewDocument(buttonJS); err != nil {
+		script := buttonScript(opts.format)
+		if _, err := p.EvalOnNewDocument(script); err != nil {
 			return
 		}
-		_, _ = p.Timeout(2 * time.Second).Eval("() => {" + buttonJS + "}")
+		_, _ = p.Timeout(2 * time.Second).Eval("() => {" + script + "}")
 		go p.EachEvent(func(e *proto.RuntimeBindingCalled) {
 			if e.Name != bindingName {
 				return
@@ -249,21 +260,25 @@ func browseDownload(ctx context.Context, cookies []*http.Cookie, job browseJob, 
 		fail(err)
 		return
 	}
-	pdfPath := filepath.Join(dir, bookFileName(book.Title, identifier))
+	name := identifier
+	if book.URN != "" {
+		name = book.URN
+	}
+	outPath := filepath.Join(dir, bookFileName(book.Title, name, opts.format))
 	fmt.Fprintf(os.Stderr, "downloading %s (%d pages)\n", book.Title, len(book.Pages))
 
 	last := time.Time{}
-	err = saveBook(ctx, d, book, pdfPath, opts, func(done, total int) {
+	err = convertBook(ctx, d, book, identifier, outPath, opts, func(phase string, done, total int) {
 		if done == total || time.Since(last) > 300*time.Millisecond {
 			last = time.Now()
-			status(fmt.Sprintf("Downloading %d/%d", done, total), false)
+			status(fmt.Sprintf("%s %d/%d", phase, done, total), false)
 		}
 	})
 	if err != nil {
 		fail(err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "saved %s\n", pdfPath)
+	fmt.Fprintf(os.Stderr, "saved %s\n", outPath)
 	status("Saved, click to download again", true)
 }
 
@@ -329,9 +344,9 @@ func defaultDownloadDir() string {
 	return "."
 }
 
-// bookFileName names a PDF after the book's title, keeping the id so two
+// bookFileName names a file after the book's title, keeping the id so two
 // editions with the same title do not overwrite each other.
-func bookFileName(title, identifier string) string {
+func bookFileName(title, identifier, ext string) string {
 	id := outputStem(identifier, identifier)
 	title = strings.ReplaceAll(title, " : ", " - ")
 	title = strings.Map(func(r rune) rune {
@@ -348,7 +363,7 @@ func bookFileName(title, identifier string) string {
 		title = strings.TrimSpace(string(runes[:120]))
 	}
 	if title == "" {
-		return id + ".pdf"
+		return id + "." + ext
 	}
-	return title + " (" + id + ").pdf"
+	return title + " (" + id + ")." + ext
 }
