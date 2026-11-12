@@ -130,3 +130,33 @@ func TestTextBlocksLegendInFrame(t *testing.T) {
 		t.Errorf("splitCaptions = %q", blockTexts(parts))
 	}
 }
+
+// A photo OCR did not see leaves a tall stretch of the column with only
+// its labels in it; a section break's space holds its number, which stays.
+func TestTextBlocksGapPicture(t *testing.T) {
+	long := "Dette er en lang linje med mange ord i seg som fortsetter"
+	body := func(y float64) textBlock {
+		return blockOf(wordsLine(long, 350, y, 1960), wordsLine(long, 350, y+78, 1960), wordsLine(long, 350, y+156, 1960))
+	}
+	st := bookStats{bodyLH: 0.0126}
+	pg := &textPage{Width: 2409, Height: 3559, Blocks: []textBlock{
+		body(400),
+		blockOf(wordsLine("EBA", 400, 900, 492)),
+		blockOf(wordsLine("LBA", 400, 1400, 486)),
+		blockOf(wordsLine("Forskjellen på båttyper mellom eldre bronsealder (øverst) og yngre", 560, 2000, 1960)),
+		body(2200),
+	}}
+	got := blockTexts(textBlocks(pg, st))
+	want := []string{textOf(body(400)), "[picture]",
+		"Forskjellen på båttyper mellom eldre bronsealder (øverst) og yngre", textOf(body(2200))}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	pg.Blocks = []textBlock{body(400), blockOf(wordsLine("III.", 1100, 800, 1160)), body(1050)}
+	got = blockTexts(textBlocks(pg, st))
+	want = []string{textOf(body(400)), "III.", textOf(body(1050))}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("section break: got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}

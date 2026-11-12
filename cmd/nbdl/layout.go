@@ -146,7 +146,7 @@ func textBlocks(pg *textPage, st bookStats) []textBlock {
 			out = append(out, splitLabels(part)...)
 		}
 	}
-	return assembleFigures(dropPageNumber(out, pg), pg, st)
+	return assembleFigures(gapPictures(dropPageNumber(out, pg), pg), pg, st)
 }
 
 func boxOf(lines []textLine) rect {

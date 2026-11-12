@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -26,6 +27,88 @@ const (
 	roleSeed
 	roleText
 )
+
+// roleOf decides what a block may become in a chart.
+func roleOf(b textBlock, col rect) int {
+	switch {
+	case b.Image:
+		return roleSeed
+	case caption(b) || bodyText(b, col):
+		return roleText
+	case drawing(b) && !plainText(b) && !textLines(b, col):
+		return roleSeed
+	case prose(b, col):
+		return roleText
+	}
+	return roleLabel
+}
+
+// minGapPicture is the height, of the page, of an empty stretch between
+// text that is taken for a picture OCR did not see.
+const minGapPicture = 0.1
+
+// gapPictures adds a picture block for each tall stretch of the column
+// between two pieces of text that holds no text of its own, only labels
+// or nothing: a photograph or map OCR did not recognise ("EBA" and "LBA"
+// over two photos of boats). Stretches that turn out to be empty paper are
+// dropped when the picture is fetched.
+func gapPictures(blocks []textBlock, pg *textPage) []textBlock {
+	col := textColumn(blocks, pg)
+	// The text, top to bottom: OCR does not always list it in that order.
+	var text []rect
+	for _, b := range blocks {
+		if !b.Image && !gapFiller(b, col) {
+			text = append(text, b.Box)
+		}
+	}
+	sort.Slice(text, func(i, j int) bool { return text[i].Y0 < text[j].Y0 })
+	var gaps []rect
+	for i := 1; i < len(text); i++ {
+		bottom := text[0].Y1
+		for _, r := range text[:i] {
+			bottom = max(bottom, r.Y1)
+		}
+		if text[i].Y0-bottom >= minGapPicture*pg.Height {
+			gaps = append(gaps, rect{col.X0, bottom, col.X1, text[i].Y0})
+		}
+	}
+	if len(gaps) == 0 {
+		return blocks
+	}
+	// Each picture goes before the first block below it.
+	var out []textBlock
+	for _, b := range blocks {
+		for k := 0; k < len(gaps); k++ {
+			if b.Box.Y0 >= gaps[k].Y1 && !b.Image && !gapFiller(b, col) {
+				out = append(out, textBlock{Box: gaps[k], Image: true})
+				gaps = append(gaps[:k], gaps[k+1:]...)
+				k--
+			}
+		}
+		out = append(out, b)
+	}
+	for _, g := range gaps {
+		out = append(out, textBlock{Box: g, Image: true})
+	}
+	return out
+}
+
+// gapFiller reports whether a block may sit in a picture OCR did not see:
+// a drawing it tried to read, or short labels ("EBA", "Øysunde").
+func gapFiller(b textBlock, col rect) bool {
+	if roleOf(b, col) == roleSeed {
+		return true
+	}
+	words := 0 // on the fullest line
+	for _, l := range b.Lines {
+		words = max(words, len(l.Words))
+	}
+	// A chapter's or section's number ("III.") is text, alone in its space.
+	if len(b.Lines) == 1 && chapterNumber(lineText(b.Lines[0])) != "" {
+		return false
+	}
+	return roleOf(b, col) == roleLabel && words <= 3 && b.Box.W() < col.W()/2
+}
 
 // captionWords open the lines that number a figure or name its source.
 var captionWords = map[string]bool{
@@ -149,6 +232,16 @@ func prose(b textBlock, col rect) bool {
 		}
 	}
 	if len(b.Lines) >= 3 && 2*chart >= len(b.Lines) {
+		return false
+	}
+	// Words set in columns on every line: a table's heads.
+	spread := 0
+	for _, l := range b.Lines {
+		if farGap(l) > 0 {
+			spread++
+		}
+	}
+	if spread == len(b.Lines) {
 		return false
 	}
 	for _, l := range b.Lines {
@@ -346,16 +439,7 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 
 	role := make([]int, len(blocks))
 	for i, b := range blocks {
-		switch {
-		case b.Image:
-			role[i] = roleSeed
-		case caption(b) || bodyText(b, col):
-			role[i] = roleText
-		case drawing(b) && !plainText(b) && !textLines(b, col):
-			role[i] = roleSeed
-		case prose(b, col):
-			role[i] = roleText
-		}
+		role[i] = roleOf(b, col)
 	}
 
 	// Regions are named by their first seed; alive marks those not merged

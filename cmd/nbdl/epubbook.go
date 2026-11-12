@@ -122,15 +122,16 @@ func saveEPUB(ctx context.Context, d *downloader, book *Book, identifier, outPat
 		cover = 0
 	}
 	type imageJob struct {
-		name string
-		url  string
+		name   string
+		url    string
+		region bool // a part of a page, which may turn out to be empty
 	}
 	var jobs []imageJob
 	if cover >= 0 {
-		jobs = append(jobs, imageJob{"cover.jpg", imageURL(book.Pages[cover], opts.width)})
+		jobs = append(jobs, imageJob{"cover.jpg", imageURL(book.Pages[cover], opts.width), false})
 	}
 	for _, f := range figures {
-		jobs = append(jobs, imageJob{f.Name, figureURL(book.Pages[f.Page], pages[f.Page].Text, f.Region, opts.width)})
+		jobs = append(jobs, imageJob{f.Name, figureURL(book.Pages[f.Page], pages[f.Page].Text, f.Region, opts.width), f.Region != rect{}})
 	}
 	images := make([]epubImage, len(jobs))
 	err = parallel(ctx, len(jobs), opts.workers, func(done, total int) { report("Fetching pictures", done, total) },
@@ -146,6 +147,11 @@ func saveEPUB(ctx context.Context, d *downloader, book *Book, identifier, outPat
 				// One picture nb.no keeps refusing should not cost the
 				// whole book; it is left out.
 				fmt.Fprintf(os.Stderr, "\nwarning: leaving out picture %s: %v\n", jobs[j].name, err)
+				return nil
+			}
+			// Pictures are also guessed from empty space between text;
+			// where the space really is empty, there is no picture.
+			if jobs[j].region && blankImage(data) {
 				return nil
 			}
 			images[j] = epubImage{Name: jobs[j].name, Data: data, MediaType: "image/jpeg"}
