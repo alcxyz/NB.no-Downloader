@@ -81,14 +81,22 @@ func saveEPUB(ctx context.Context, d *downloader, book *Book, identifier, outPat
 		return fmt.Errorf("%w (work files are kept in %s; try again to resume)", err, dir)
 	}
 
-	capEngine := &lazyEngine{lang: tesseractLang(languages), workers: 1}
-	if n := restoreCaps(ctx, d, book, pages, dir, capEngine); n > 0 {
+	// Drop caps and note numbers OCR missed are read again from parts of
+	// the page images.
+	engine := &lazyEngine{lang: tesseractLang(languages), workers: opts.workers}
+	defer engine.close()
+	if n := restoreCaps(ctx, d, book, pages, dir, engine); n > 0 {
 		fmt.Fprintf(os.Stderr, "read %d drop caps OCR had missed\n", n)
 	}
-	capEngine.close()
 
 	if st := correctWords(pages); st.corrected > 0 {
 		fmt.Fprintf(os.Stderr, "corrected %d of %d doubtful words against the book's vocabulary\n", st.corrected, st.doubtful)
+	}
+	if n := readNoteRefs(ctx, d, book, pages, dir, engine, opts.workers, report); n > 0 {
+		fmt.Fprintf(os.Stderr, "\nread %d note references\n", n)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// Pages with little text are either blank or pictures and title pages,
@@ -186,6 +194,7 @@ func saveEPUB(ctx context.Context, d *downloader, book *Book, identifier, outPat
 		}
 	}
 	eb.Chapters = withoutFigures(chapters, missing)
+	linkAcross(eb.Chapters)
 
 	report("Writing EPUB", 0, 1)
 	tmp := outPath + ".part"

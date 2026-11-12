@@ -47,6 +47,10 @@ type textWord struct {
 	// word, the second part is skipped.
 	HypFull  string
 	HypPart2 bool
+	// A note reference printed after the word, which OCR rarely reads:
+	// Marker records that one was there, Note its number once read.
+	Marker bool
+	Note   int
 }
 
 type textLine struct {
@@ -136,6 +140,8 @@ func parseTSV(tsv string) (*textPage, error) {
 // ocrEngine turns a page image into Tesseract TSV.
 type ocrEngine interface {
 	recognize(ctx context.Context, imagePath string) (string, error)
+	// recognizeLine reads an image holding a single line of text.
+	recognizeLine(ctx context.Context, imagePath string) (string, error)
 	name() string
 	close()
 }
@@ -184,7 +190,16 @@ func (n *nativeOCR) name() string { return "tesseract" }
 func (n *nativeOCR) close()       {}
 
 func (n *nativeOCR) recognize(ctx context.Context, imagePath string) (string, error) {
-	cmd := exec.CommandContext(ctx, n.bin, imagePath, "stdout", "-l", n.lang, "tsv")
+	return n.run(ctx, imagePath)
+}
+
+func (n *nativeOCR) recognizeLine(ctx context.Context, imagePath string) (string, error) {
+	return n.run(ctx, imagePath, "--psm", "7")
+}
+
+func (n *nativeOCR) run(ctx context.Context, imagePath string, args ...string) (string, error) {
+	args = append([]string{imagePath, "stdout", "-l", n.lang}, append(args, "tsv")...)
+	cmd := exec.CommandContext(ctx, n.bin, args...)
 	// Pages already run in parallel; Tesseract's own threads would only
 	// compete with each other.
 	cmd.Env = append(os.Environ(), "OMP_THREAD_LIMIT=1")
@@ -347,6 +362,19 @@ func newBrowserOCR(ctx context.Context, lang string, workers int) (*browserOCR, 
 				scheduler.addWorker(w);
 			}
 			window.nbdlOCR = scheduler;
+			// One more worker reads single lines, such as note numbers.
+			window.nbdlLine = async () => {
+				if (!window.nbdlLineWorker) {
+					const w = await Tesseract.createWorker(lang, 1, {
+						workerPath: "/a/worker.min.js",
+						corePath: "/a/tesseract-core-simd-lstm.wasm.js",
+						langPath: "/a/", gzip: true, workerBlobURL: false, cacheMethod: "none",
+					});
+					await w.setParameters({tessedit_pageseg_mode: "7"});
+					window.nbdlLineWorker = w;
+				}
+				return window.nbdlLineWorker;
+			};
 		}`, lang, max(workers, 1)).ByPromise())
 	}
 	if err != nil {
@@ -359,15 +387,27 @@ func newBrowserOCR(ctx context.Context, lang string, workers int) (*browserOCR, 
 func (o *browserOCR) name() string { return "built-in tesseract.js" }
 
 func (o *browserOCR) recognize(ctx context.Context, imagePath string) (string, error) {
+	return o.run(ctx, imagePath, `async (img) => {
+		const r = await window.nbdlOCR.addJob("recognize", img, {}, {tsv: true, text: false, blocks: false});
+		return r.data.tsv;
+	}`)
+}
+
+func (o *browserOCR) recognizeLine(ctx context.Context, imagePath string) (string, error) {
+	return o.run(ctx, imagePath, `async (img) => {
+		const w = await window.nbdlLine();
+		const r = await w.recognize(img, {}, {tsv: true, text: false, blocks: false});
+		return r.data.tsv;
+	}`)
+}
+
+func (o *browserOCR) run(ctx context.Context, imagePath, script string) (string, error) {
 	data, err := os.ReadFile(imagePath)
 	if err != nil {
 		return "", err
 	}
 	url := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(data)
-	res, err := o.page.Context(ctx).Timeout(5 * time.Minute).Evaluate(rod.Eval(`async (img) => {
-		const r = await window.nbdlOCR.addJob("recognize", img, {}, {tsv: true, text: false, blocks: false});
-		return r.data.tsv;
-	}`, url).ByPromise())
+	res, err := o.page.Context(ctx).Timeout(5 * time.Minute).Evaluate(rod.Eval(script, url).ByPromise())
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()

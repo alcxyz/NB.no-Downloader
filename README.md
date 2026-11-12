@@ -88,9 +88,17 @@ in one of two ways:
 
 `nbdl` then rebuilds the book: paragraphs flow across pages, words hyphenated
 at line ends are joined, running heads and page numbers are dropped, headings
-and chapters are found (including chapters numbered I, II, III), charts and
-illustrations are cut out of the scans as pictures, and title pages and
-picture pages are kept as images. The front cover becomes the cover.
+and chapters are found (including chapters numbered I, II, III), charts,
+tables, maps and illustrations are cut out of the scans as pictures with
+their labels, and title pages and picture pages are kept as images. The
+front cover becomes the cover.
+
+Where text recognition stumbles, `nbdl` reads small parts of the page images
+again: a chapter's large initial letter it missed, and the small raised
+numbers that refer to notes. Notes at the back of the book are numbered and
+linked to and from the text; a reference is linked only when its number is
+read clearly and fits the order of the others, so some stay unlinked rather
+than point to the wrong note.
 
 The EPUB carries nb.no's catalogue data: title and subtitle, authors, ISBN,
 publisher, year, language, subjects and summary, so e-book managers such as

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -55,11 +56,13 @@ type figureRef struct {
 }
 
 type para struct {
-	kind  string // "p", "h1", "h2", "note", "figure", or the markers "chapter" and "break"
-	text  string
-	image string // figure file name
-	page  int
-	lh    float64 // median line height relative to the page
+	kind   string // "p", "h1", "h2", "note", "figure", "endnote", or the markers "chapter" and "break"
+	text   string
+	image  string // figure file name
+	page   int
+	lh     float64 // median line height relative to the page
+	note   int     // an endnote's number
+	linked bool    // an endnote the text links to
 }
 
 // bookStats are measured once over the whole book.
@@ -430,6 +433,7 @@ func wordCount(blocks []textBlock) int {
 // layoutBook turns pages into chapters and lists the images they use.
 func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 	st := measureBook(pages)
+	notes := notesPages(pages, st)
 	var paras []para
 	var figures []figureRef
 
@@ -444,6 +448,9 @@ func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 			continue
 		}
 		pg := lp.Text
+		if notes[i] {
+			pg = withNoteNumbers(pg, st)
+		}
 		blocks := textBlocks(pg, st)
 		if lp.Title {
 			paras = append(paras, para{kind: "chapter", page: i}, para{kind: "h1", text: titleText(blocks), page: i})
@@ -473,6 +480,11 @@ func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 				name := fmt.Sprintf("p%04d-%d.jpg", i+1, len(figures)+1)
 				figures = append(figures, figureRef{Page: i, Region: b.Box, Name: name})
 				paras = append(paras, para{kind: "figure", image: name, page: i})
+				continue
+			}
+			if notes[i] && numberedLines(&textPage{Blocks: []textBlock{b}}) > 0 {
+				paras = append(paras, noteParas(b, i)...)
+				first = false
 				continue
 			}
 			fixDropCap(b.Lines)
@@ -509,8 +521,13 @@ func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 		}
 	}
 	paras = mergeContinued(paras)
+	noteNums := numberNotes(paras, func(p para) bool { return notes[p.page] })
 	for i := range paras {
 		paras[i].text = fixOCR(paras[i].text)
+	}
+	linked := keepRefs(paras, noteNums)
+	for i := range paras {
+		paras[i].linked = paras[i].kind == "endnote" && linked[paras[i].note]
 	}
 	paras = chapterTitles(paras, st)
 	return chapters(paras), figures
@@ -596,7 +613,7 @@ var countingWords = map[string]bool{
 }
 
 func endsLowerLetter(s string) bool {
-	r := []rune(s)
+	r := []rune(stripRefs(s))
 	return len(r) > 0 && unicode.IsLower(r[len(r)-1])
 }
 
@@ -852,6 +869,9 @@ func joinLines(lines []textLine) string {
 				text = w.HypFull
 			}
 			appendWord(&b, text)
+			if w.Note > 0 {
+				b.WriteString(refMark(w.Note))
+			}
 		}
 	}
 	return b.String()
@@ -902,7 +922,7 @@ func startsLower(s string) bool {
 }
 
 func endsSentence(s string) bool {
-	s = strings.TrimSpace(s)
+	s = strings.TrimSpace(stripRefs(s))
 	if s == "" {
 		return true
 	}
@@ -935,7 +955,7 @@ func mergeContinued(paras []para) []para {
 				// line of body text set a little large.
 				prev.kind = "p"
 			}
-			if prev.kind == "p" && continues {
+			if (prev.kind == "p" || prev.kind == "endnote") && continues {
 				var b strings.Builder
 				b.WriteString(prev.text)
 				appendWord(&b, p.text)
@@ -989,7 +1009,7 @@ func chapters(paras []para) []epubChapter {
 		}
 		switch p.kind {
 		case "h1", "h2":
-			text := p.text
+			text := stripRefs(p.text)
 			if n := chapterNumber(text); n != "" {
 				text = n
 			}
@@ -1001,7 +1021,15 @@ func chapters(paras []para) []epubChapter {
 				afterHeading = true
 			}
 		case "note":
-			fmt.Fprintf(&body, "<p class=\"note\">%s</p>\n", xmlEscape(p.text))
+			fmt.Fprintf(&body, "<p class=\"note\">%s</p>\n", noteLinks(xmlEscape(p.text)))
+			hasText = true
+		case "endnote":
+			num := strconv.Itoa(p.note)
+			if p.linked {
+				num = `<a class="noteback" href="#ref-` + num + `">` + num + `</a>`
+			}
+			fmt.Fprintf(&body, "<p class=\"endnote\" id=\"note-%d\">%s %s</p>\n", p.note, num, xmlEscape(p.text))
+			afterHeading = false
 			hasText = true
 		case "figure":
 			fmt.Fprintf(&body, "<figure class=\"%s\"><img src=\"images/%s\" alt=\"\"/></figure>\n", figureClass(p.image), p.image)
@@ -1009,9 +1037,9 @@ func chapters(paras []para) []epubChapter {
 			hasText = true
 		default:
 			if afterHeading {
-				fmt.Fprintf(&body, "<p class=\"noindent\">%s</p>\n", xmlEscape(p.text))
+				fmt.Fprintf(&body, "<p class=\"noindent\">%s</p>\n", noteLinks(xmlEscape(p.text)))
 			} else {
-				fmt.Fprintf(&body, "<p>%s</p>\n", xmlEscape(p.text))
+				fmt.Fprintf(&body, "<p>%s</p>\n", noteLinks(xmlEscape(p.text)))
 			}
 			afterHeading = false
 			hasText = true
@@ -1025,6 +1053,7 @@ func chapters(paras []para) []epubChapter {
 // words, which is how the table of contents finds it again.
 func chapterTitle(rest []para) string {
 	for _, p := range rest {
+		p.text = stripRefs(p.text)
 		switch p.kind {
 		case "h1", "h2":
 			if n := chapterNumber(p.text); n != "" {

@@ -45,6 +45,7 @@ func correctWords(pages []layoutPage) correctionStats {
 		eachWord(lp, func(w *textWord) {
 			if t := stripNoteMarker(w.Text); t != w.Text {
 				w.Text = t
+				w.Marker = true
 				st.markers++
 			}
 			if w.HypPart2 || w.HypFull != "" {

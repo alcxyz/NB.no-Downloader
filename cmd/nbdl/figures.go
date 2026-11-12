@@ -191,6 +191,11 @@ func strayLabel(b textBlock) bool {
 	if len(b.Lines) > 2 || letterShare(b) >= 0.7 {
 		return false
 	}
+	// A short sentence of figures is text, such as a reference
+	// ("Se NOU 2002: 9 (2003)."); labels do not end in a full stop.
+	if t := textOf(b); len(strings.Fields(t)) >= 3 && strings.HasSuffix(strings.TrimSpace(t), ".") {
+		return false
+	}
 	for _, l := range b.Lines {
 		for _, w := range l.Words {
 			letters := 0

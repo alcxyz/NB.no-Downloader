@@ -64,6 +64,9 @@ figure { margin: 1em 0; text-align: center; }
 img { max-width: 100%; height: auto; }
 figcaption { font-size: 0.9em; }
 hr.break { border: 0; margin: 1.2em 0; }
+a.noteref { text-decoration: none; }
+a.noteref sup { font-size: 0.7em; line-height: 0; }
+p.endnote { text-indent: 0; margin: 0 0 0.5em 0; }
 .pageimage { display: block; margin: 0 auto; max-width: 100%; max-height: 100%; page-break-inside: avoid; }
 div.cover { margin: 0; padding: 0; height: 100%; text-align: center; }
 div.cover img { max-width: 100%; max-height: 100%; height: 100%; }
