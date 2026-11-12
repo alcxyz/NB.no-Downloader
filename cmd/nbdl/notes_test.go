@@ -131,3 +131,13 @@ func TestLinkAcross(t *testing.T) {
 		t.Errorf("text not escaped: %s", chs[0].Body)
 	}
 }
+
+func TestBestReading(t *testing.T) {
+	for _, c := range []struct{ whole, raised, want int }{
+		{120, 0, 120}, {0, 16, 16}, {3, 53, 53}, {38, 28, 38}, {0, 0, 0}, {44, 4, 44},
+	} {
+		if got := bestReading(c.whole, c.raised); got != c.want {
+			t.Errorf("bestReading(%d, %d) = %d, want %d", c.whole, c.raised, got, c.want)
+		}
+	}
+}
