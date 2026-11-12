@@ -64,51 +64,18 @@ func readNoteRefs(ctx context.Context, d *downloader, book *Book, pages []layout
 		return 0
 	}
 	read := make([]int, len(jobs))
-	_ = parallel(ctx, len(jobs), workers, func(done, total int) { report("Reading note numbers", done, total) },
+	_ = parallel(ctx, len(jobs), workers, func(done, total int) { report("Reading note references", done, total) },
 		func(ctx context.Context, j int) error {
 			pg := pages[jobs[j].page].Text
 			w := jobs[j].word
 			h := w.Box.H()
 			// The raised number ends the word, in its upper part.
 			region := rect{max(0, w.Box.X1-1.8*h), max(0, w.Box.Y0-0.3*h), min(pg.Width, w.Box.X1+0.3*h), w.Box.Y0 + 0.7*h}
-			key := sha256.Sum256([]byte(fmt.Sprintf("%d %v", jobs[j].page, region)))
-			data, err := d.cachedImage(ctx, filepath.Join(dir, fmt.Sprintf("ref-%x.jpg", key[:8])),
-				figureURL(book.Pages[jobs[j].page], pg, region, 0))
-			if err != nil {
-				return nil
-			}
-			img, err := jpeg.Decode(bytes.NewReader(data))
-			if err != nil {
-				return nil
-			}
-			path := filepath.Join(dir, fmt.Sprintf("ref-%04d-%d.jpg", jobs[j].page+1, j))
-			var buf bytes.Buffer
-			if err := jpeg.Encode(&buf, enlarge(toGray(img), 4, 60), &jpeg.Options{Quality: 95}); err != nil {
-				return nil
-			}
-			if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
-				return nil
-			}
-			defer os.Remove(path)
-			engine, err := engines.get(ctx)
+			text, err := readRegion(ctx, d, book, pg, jobs[j].page, region, dir, engines)
 			if err != nil {
 				return err
 			}
-			tsv, err := engine.recognizeLine(ctx, path)
-			if err != nil {
-				return nil
-			}
-			pgRead, err := parseTSV(tsv)
-			if err != nil {
-				return nil
-			}
-			var text strings.Builder
-			for _, b := range pgRead.Blocks {
-				for _, l := range b.Lines {
-					text.WriteString(lineText(l))
-				}
-			}
-			read[j] = markerNumber(text.String())
+			read[j] = markerNumber(text)
 			return nil
 		})
 	// What OCR made of a marker it did not read as a number may be left
@@ -155,6 +122,127 @@ func trimMarker(word string, num int, remnants string) string {
 		return t
 	}
 	return word
+}
+
+// readNoteNumbers reads the numbers of notes whose number OCR missed,
+// from the strip of the page image left of the note's first line, where
+// the number is printed. A note continued from the line before has none,
+// and stays a continuation. It returns how many it read.
+func readNoteNumbers(ctx context.Context, d *downloader, book *Book, pages []layoutPage, dir string, engines *lazyEngine, workers int, report progressFunc) int {
+	st := measureBook(pages)
+	type job struct {
+		page int
+		line *textLine
+	}
+	var jobs []job
+	notes := notesPages(pages, st)
+	for i := range pages {
+		if !notes[i] {
+			continue
+		}
+		pg := pages[i].Text
+		view := withNoteNumbers(pg, st)
+		numbered := map[rect]bool{}
+		for _, b := range view.Blocks {
+			for _, l := range b.Lines {
+				if noteNumber(l) != 0 {
+					numbered[l.Box] = true
+				}
+			}
+		}
+		for bi := range pg.Blocks {
+			b := &pg.Blocks[bi]
+			if b.Margin || b.Image || len(b.Lines) == 0 {
+				continue
+			}
+			l := &b.Lines[0]
+			if numbered[l.Box] || noteNumber(*l) != 0 || len(l.Words) < 2 || !startsUpper(l.Words[0].Text) {
+				continue
+			}
+			jobs = append(jobs, job{i, l})
+		}
+	}
+	if len(jobs) == 0 {
+		return 0
+	}
+	read := make([]int, len(jobs))
+	_ = parallel(ctx, len(jobs), workers, func(done, total int) { report("Reading note numbers", done, total) },
+		func(ctx context.Context, j int) error {
+			pg := pages[jobs[j].page].Text
+			l := jobs[j].line
+			h := l.Box.H()
+			region := rect{max(0, l.Box.X0-3*h), l.Box.Y0, l.Box.X0 - 0.15*h, l.Box.Y1}
+			if region.W() <= 0 {
+				return nil
+			}
+			text, err := readRegion(ctx, d, book, pg, jobs[j].page, region, dir, engines)
+			if err != nil {
+				return err
+			}
+			// Nothing but the number is printed here, so a lone stroke is
+			// a one.
+			t := strings.TrimRight(strings.TrimSpace(text), ".")
+			if t != "" && len(t) <= 3 && strings.Trim(t, "0123456789oOlI|") == "" {
+				n, err := strconv.Atoi(strings.NewReplacer("o", "0", "O", "0", "l", "1", "I", "1", "|", "1").Replace(t))
+				if err == nil && n > 0 {
+					read[j] = n
+				}
+			}
+			return nil
+		})
+	n := 0
+	for j, num := range read {
+		if num > 0 {
+			l := jobs[j].line
+			box := rect{l.Box.X0 - 2*l.Box.H(), l.Box.Y0, l.Box.X0 - 0.2*l.Box.H(), l.Box.Y1}
+			l.Words = append([]textWord{{Text: strconv.Itoa(num), Box: box, Conf: 1}}, l.Words...)
+			n++
+		}
+	}
+	return n
+}
+
+// readRegion reads a part of a page image as a single line of text,
+// enlarged.
+func readRegion(ctx context.Context, d *downloader, book *Book, pg *textPage, page int, region rect, dir string, engines *lazyEngine) (string, error) {
+	key := sha256.Sum256([]byte(fmt.Sprintf("%d %v", page, region)))
+	data, err := d.cachedImage(ctx, filepath.Join(dir, fmt.Sprintf("ref-%x.jpg", key[:8])), figureURL(book.Pages[page], pg, region, 0))
+	if err != nil {
+		return "", ctx.Err()
+	}
+	img, err := jpeg.Decode(bytes.NewReader(data))
+	if err != nil {
+		return "", nil
+	}
+	f, err := os.CreateTemp(dir, "read-*.jpg")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(f.Name())
+	err = jpeg.Encode(f, enlarge(toGray(img), 4, 60), &jpeg.Options{Quality: 95})
+	f.Close()
+	if err != nil {
+		return "", err
+	}
+	engine, err := engines.get(ctx)
+	if err != nil {
+		return "", err
+	}
+	tsv, err := engine.recognizeLine(ctx, f.Name())
+	if err != nil {
+		return "", nil
+	}
+	read, err := parseTSV(tsv)
+	if err != nil {
+		return "", nil
+	}
+	var text strings.Builder
+	for _, b := range read.Blocks {
+		for _, l := range b.Lines {
+			text.WriteString(lineText(l))
+		}
+	}
+	return text.String(), nil
 }
 
 // markerNumber takes the number at the end of what OCR read of a word's
@@ -461,9 +549,11 @@ func noteParas(b textBlock, page int) []para {
 // and is otherwise the continuation of the note before. It returns the
 // numbers of the notes.
 func numberNotes(paras []para, inNotes func(p para) bool) map[int]bool {
+	// Notes, and paragraphs that may be notes: OCR's remains of a column
+	// of numbers ("An a w") hold no word and are none.
 	var idx []int
 	for i, p := range paras {
-		if inNotes(p) && (p.kind == "endnote" || p.kind == "p") {
+		if inNotes(p) && (p.kind == "endnote" || p.kind == "p" && realWord.MatchString(p.text)) {
 			idx = append(idx, i)
 		}
 	}
@@ -518,6 +608,8 @@ func numberNotes(paras []para, inNotes func(p para) bool) map[int]bool {
 	}
 	return nums
 }
+
+var realWord = regexp.MustCompile(`\pL{3}`)
 
 // keepRefs keeps the references that name an existing note and keep the
 // book's order, the longest such run; the others are dropped.

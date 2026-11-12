@@ -92,6 +92,9 @@ func saveEPUB(ctx context.Context, d *downloader, book *Book, identifier, outPat
 	if st := correctWords(pages); st.corrected > 0 {
 		fmt.Fprintf(os.Stderr, "corrected %d of %d doubtful words against the book's vocabulary\n", st.corrected, st.doubtful)
 	}
+	if n := readNoteNumbers(ctx, d, book, pages, dir, engine, opts.workers, report); n > 0 {
+		fmt.Fprintf(os.Stderr, "\nread %d note numbers OCR had missed\n", n)
+	}
 	if n := readNoteRefs(ctx, d, book, pages, dir, engine, opts.workers, report); n > 0 {
 		fmt.Fprintf(os.Stderr, "\nread %d note references\n", n)
 	}

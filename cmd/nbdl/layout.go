@@ -434,6 +434,10 @@ func wordCount(blocks []textBlock) int {
 func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 	st := measureBook(pages)
 	notes := notesPages(pages, st)
+	notesStart := len(pages)
+	for i := range notes {
+		notesStart = min(notesStart, i)
+	}
 	var paras []para
 	var figures []figureRef
 
@@ -480,6 +484,12 @@ func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 				name := fmt.Sprintf("p%04d-%d.jpg", i+1, len(figures)+1)
 				figures = append(figures, figureRef{Page: i, Region: b.Box, Name: name})
 				paras = append(paras, para{kind: "figure", image: name, page: i})
+				continue
+			}
+			// The notes' heading opens a chapter of its own.
+			if i == notesStart && len(b.Lines) == 1 && notesTitle.MatchString(strings.TrimSpace(lineText(b.Lines[0]))) {
+				paras = append(paras, para{kind: "chapter", page: i}, para{kind: "h1", text: lineText(b.Lines[0]), page: i})
+				first = false
 				continue
 			}
 			if notes[i] && numberedLines(&textPage{Blocks: []textBlock{b}}) > 0 {
