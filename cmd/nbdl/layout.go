@@ -116,8 +116,8 @@ func bodyLines(b textBlock, pg *textPage) []textLine {
 }
 
 // textBlocks returns the blocks of a page worth reading: no margins,
-// running heads or page numbers. Text recognised in charts and pictures
-// becomes a picture region, and touching regions are joined.
+// running heads or page numbers. Charts and pictures, with the labels
+// printed in and around them, become picture regions.
 func textBlocks(pg *textPage, st bookStats) []textBlock {
 	var out []textBlock
 	for _, b := range pg.Blocks {
@@ -125,7 +125,7 @@ func textBlocks(pg *textPage, st bookStats) []textBlock {
 			continue
 		}
 		if b.Image {
-			out = appendImage(out, b.Box, pg)
+			out = append(out, b)
 			continue
 		}
 		var kept []textLine
@@ -140,18 +140,21 @@ func textBlocks(pg *textPage, st bookStats) []textBlock {
 		}
 		if len(kept) < len(b.Lines) {
 			b.Lines = kept
-			b.Box = rect{}
-			for _, l := range kept {
-				b.Box = b.Box.union(l.Box)
-			}
+			b.Box = boxOf(kept)
 		}
-		if graphic(b) {
-			out = appendImage(out, b.Box, pg)
-			continue
+		for _, part := range splitCaptions(b) {
+			out = append(out, splitLabels(part)...)
 		}
-		out = append(out, b)
 	}
-	return dropPageNumber(out, pg)
+	return assembleFigures(dropPageNumber(out, pg), pg, st)
+}
+
+func boxOf(lines []textLine) rect {
+	var r rect
+	for _, l := range lines {
+		r = r.union(l.Box)
+	}
+	return r
 }
 
 // dropPageNumber removes a lone page number left first or last on a page,
@@ -174,16 +177,6 @@ func dropPageNumber(blocks []textBlock, pg *textPage) []textBlock {
 		blocks = blocks[1:]
 	}
 	return blocks
-}
-
-// appendImage adds a picture region, joining it to the previous one when
-// they touch, as the parts of one chart do.
-func appendImage(blocks []textBlock, box rect, pg *textPage) []textBlock {
-	if n := len(blocks); n > 0 && blocks[n-1].Image && box.Y0-blocks[n-1].Box.Y1 < pg.Height*0.02 {
-		blocks[n-1].Box = blocks[n-1].Box.union(box)
-		return blocks
-	}
-	return append(blocks, textBlock{Box: box, Image: true})
 }
 
 // headLine reports whether a line could be a running head or page number:
@@ -224,13 +217,18 @@ func isRoman(s string) bool {
 	return true
 }
 
-// graphic spots text recognised in charts and pictures: low confidence,
-// few letters, or many short lines of uncertain words.
-func graphic(b textBlock) bool {
+// drawing spots blocks where OCR read a chart or picture rather than text:
+// no words, low confidence, few letters, or many short lines of uncertain
+// words. Short labels are not drawings, though they may belong to one.
+func drawing(b textBlock) bool {
 	var conf float64
 	var words, letters, chars int
 	for _, l := range b.Lines {
 		for _, w := range l.Words {
+			// OCR reports drawn areas as words with no text.
+			if strings.TrimSpace(w.Text) == "" {
+				continue
+			}
 			words++
 			conf += w.Conf
 			for _, r := range w.Text {
@@ -246,10 +244,7 @@ func graphic(b textBlock) bool {
 	}
 	avg := conf / float64(words)
 	shortLines := len(b.Lines) >= 3 && float64(words)/float64(len(b.Lines)) < 5
-	// Chart labels and axes: short and mostly digits and symbols, unlike
-	// a chapter number on a line of its own.
-	labels := len(b.Lines) <= 2 && letterShare(b) < 0.7 && !(len(b.Lines) == 1 && chapterNumber(lineText(b.Lines[0])) != "")
-	return avg < 0.45 || (chars >= 3 && float64(letters)/float64(chars) < 0.5) || (avg < 0.88 && shortLines) || labels
+	return avg < 0.45 || (chars >= 3 && float64(letters)/float64(chars) < 0.5) || (avg < 0.88 && shortLines)
 }
 
 // letterShare is the share of letters among the printed characters.
@@ -462,11 +457,11 @@ func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 				switch {
 				case prev == nil && st.top > 0 && b.Box.Y0/pg.Height > st.top+sinkDepth && hasRealWord([]textBlock{b}):
 					paras = append(paras, para{kind: "chapter", page: i})
-				case prev != nil && !prev.Image && st.bodyLH > 0 && b.Box.Y0-prev.Box.Y1 > breakGap*st.bodyLH*pg.Height &&
-					len(paras) > 0 && paras[len(paras)-1].kind == "p":
+				case prev != nil && !prev.Image && !caption(*prev) && !caption(b) && st.bodyLH > 0 &&
+					b.Box.Y0-prev.Box.Y1 > breakGap*st.bodyLH*pg.Height && len(paras) > 0 && paras[len(paras)-1].kind == "p":
 					// Only a gap between two stretches of body text is a
-					// scene break; space around pictures and after
-					// headings is layout.
+					// scene break; space around pictures and their
+					// captions and after headings is layout.
 					paras = append(paras, para{kind: "break", page: i})
 				}
 			}

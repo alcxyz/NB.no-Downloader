@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"image"
@@ -134,7 +135,10 @@ func saveEPUB(ctx context.Context, d *downloader, book *Book, identifier, outPat
 	images := make([]epubImage, len(jobs))
 	err = parallel(ctx, len(jobs), opts.workers, func(done, total int) { report("Fetching pictures", done, total) },
 		func(ctx context.Context, j int) error {
-			data, err := d.cachedImage(ctx, filepath.Join(dir, "img-"+jobs[j].name), jobs[j].url)
+			// Named by the address, which holds the region, so a picture
+			// cut differently by a newer version is fetched again.
+			key := sha256.Sum256([]byte(jobs[j].url))
+			data, err := d.cachedImage(ctx, filepath.Join(dir, fmt.Sprintf("img-%x.jpg", key[:8])), jobs[j].url)
 			if err != nil {
 				if ctx.Err() != nil {
 					return ctx.Err()
