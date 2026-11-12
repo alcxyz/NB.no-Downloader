@@ -39,16 +39,7 @@ type correctionStats struct {
 
 // correctWords fixes doubtful words in place across all pages.
 func correctWords(pages []layoutPage) correctionStats {
-	vocab := map[string]int{}
-	for _, lp := range pages {
-		eachWord(lp, func(w *textWord) {
-			if w.Conf >= sureConf {
-				if _, core, _ := splitWordParts(w.Text); core != "" {
-					vocab[strings.ToLower(core)]++
-				}
-			}
-		})
-	}
+	vocab := bookVocabulary(pages)
 	var st correctionStats
 	for _, lp := range pages {
 		eachWord(lp, func(w *textWord) {
