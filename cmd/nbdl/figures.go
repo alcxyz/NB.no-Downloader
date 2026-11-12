@@ -37,7 +37,24 @@ var captionWords = map[string]bool{
 // a chart OCR read as part of the same block: the caption lines are text,
 // the rest a chart.
 func splitCaptions(b textBlock) []textBlock {
+	part := func(ls []textLine) textBlock { return textBlock{Lines: ls, Box: boxOf(ls)} }
 	if len(b.Lines) <= 4 {
+		// A chart's scale or legend, or a table's column heads, set
+		// right under its number ("FIGUR 3a" over "Minimum Medium
+		// Maksimum").
+		if len(b.Lines) > 1 && figureNumber(b) {
+			n := len(b.Lines)
+			for n > 1 {
+				lb := part(b.Lines[n-1 : n])
+				if !legendLike(lb) && letterShare(lb) > 0 && farGap(b.Lines[n-1]) == 0 {
+					break
+				}
+				n--
+			}
+			if n < len(b.Lines) {
+				return []textBlock{part(b.Lines[:n]), part(b.Lines[n:])}
+			}
+		}
 		return []textBlock{b}
 	}
 	opens := func(l textLine) bool {
@@ -51,7 +68,6 @@ func splitCaptions(b textBlock) []textBlock {
 		tb := textBlock{Lines: []textLine{l}}
 		return len(l.Words) >= 3 && letterShare(tb) >= 0.6 && conf/float64(len(l.Words)) >= doubtConf
 	}
-	part := func(ls []textLine) textBlock { return textBlock{Lines: ls, Box: boxOf(ls)} }
 	var out []textBlock
 	lines := b.Lines
 	if opens(lines[0]) {
@@ -122,6 +138,17 @@ func caption(b textBlock) bool {
 // mostly letters, with a line of several words spanning much of the column.
 func prose(b textBlock, col rect) bool {
 	if b.Image || letterShare(b) < 0.7 || legendLike(b) || (drawing(b) && !plainText(b)) {
+		return false
+	}
+	// A block of axis values and legend lines OCR read together.
+	chart := 0
+	for _, l := range b.Lines {
+		lb := textBlock{Lines: []textLine{l}}
+		if letterShare(lb) == 0 || legendLike(lb) {
+			chart++
+		}
+	}
+	if len(b.Lines) >= 3 && 2*chart >= len(b.Lines) {
 		return false
 	}
 	for _, l := range b.Lines {
@@ -205,17 +232,32 @@ func legendLike(b textBlock) bool {
 	}
 	for _, l := range b.Lines {
 		for _, w := range l.Words {
-			if strings.Trim(w.Text, "-—–=\"“”'+o•*") == "" {
+			// A lone "=" belongs to titles ("indeks: 2020 = 100").
+			if w.Text != "=" && strings.Trim(w.Text, "-—–=\"“”'+o•*") == "" {
 				return true
 			}
-			if strings.Contains(w.Text, "--") || strings.Contains(w.Text, "——") || strings.Contains(w.Text, "—-") ||
-				strings.Contains(w.Text, "-—") || strings.Contains(w.Text, "==") || strings.Contains(w.Text, "\"\"") ||
-				strings.HasPrefix(w.Text, "—>") || strings.HasPrefix(w.Text, "->") {
+			if lineSample(w.Text) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// lineSample reports whether a word holds a legend's line sample as OCR
+// reads it: runs of dashes, equals signs or quotes, or an arrow
+// ("------", "—-Norgefastland", "—>Rentedifferanse"). Dashes between
+// figures are a range ("1984—-2013").
+func lineSample(w string) bool {
+	if strings.IndexAny(w, "0123456789") >= 0 {
+		return false
+	}
+	for _, run := range []string{"--", "——", "—-", "-—", "==", "\"\""} {
+		if strings.Contains(w, run) {
+			return true
+		}
+	}
+	return strings.HasPrefix(w, "—>") || strings.HasPrefix(w, "->")
 }
 
 // splitLabels separates chart labels that OCR set on the first or last
@@ -241,7 +283,8 @@ func splitLabels(b textBlock) []textBlock {
 	// A line of figures that is not a label lines up with the text it
 	// belongs to, as the years ending a title do ("1870-2013").
 	apart := func(l, other textLine) bool {
-		return strings.Contains(lineText(l), "%") || abs(l.Box.X0-other.Box.X0) > 2*other.Box.H()
+		return strings.Contains(lineText(l), "%") || abs(l.Box.X0-other.Box.X0) > 2*other.Box.H() ||
+			l.Box.H() < 0.7*other.Box.H()
 	}
 	lines := b.Lines
 	for len(lines) > 1 && label(lines[0].Words) && apart(lines[0], lines[1]) {
@@ -437,6 +480,22 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 			out = append(out, textBlock{Box: rb, Image: true})
 		}
 	}
+	// OCR sometimes reads a picture before the caption printed above it.
+	for i := 0; i < len(out); i++ {
+		if !out[i].Image {
+			continue
+		}
+		j := i
+		for j+1 < len(out) && !out[j+1].Image && out[j+1].Box.Y1 <= out[i].Box.Y0+lh {
+			j++
+		}
+		if j > i {
+			pic := out[i]
+			copy(out[i:j], out[i+1:j+1])
+			out[j] = pic
+			i = j
+		}
+	}
 	return out
 }
 
@@ -493,9 +552,12 @@ func figureBands(blocks []textBlock, role []int, col rect, lh float64) [][]int {
 		if bottom < 0 {
 			continue
 		}
+		// Inside the frame, short text is part of the chart too: a
+		// legend OCR read as words ("Statsbudsjett M Statsregnskap").
 		var band []int
 		for j, c := range blocks {
-			if role[j] != roleText && c.Box.Y0 >= top && c.Box.Y1 <= bottom {
+			legend := role[j] == roleText && len(c.Lines) <= 2 && !caption(c) && !figureNumber(c) && !bodyText(c, col)
+			if (role[j] != roleText || legend) && c.Box.Y0 >= top && c.Box.Y1 <= bottom {
 				band = append(band, j)
 			}
 		}
@@ -506,13 +568,15 @@ func figureBands(blocks []textBlock, role []int, col rect, lh float64) [][]int {
 	return bands
 }
 
-// figureNumber reports whether a block numbers a figure ("FIGUR 31").
+// figureNumber reports whether a block numbers a figure or table
+// ("FIGUR 31", "TABELL 4").
 func figureNumber(b textBlock) bool {
 	if len(b.Lines) == 0 || len(b.Lines[0].Words) < 2 {
 		return false
 	}
 	first := strings.ToLower(strings.TrimRight(b.Lines[0].Words[0].Text, ".:"))
-	return (first == "figur" || first == "figure" || first == "fig") && strings.IndexAny(b.Lines[0].Words[1].Text, "0123456789") >= 0
+	numbered := first == "figur" || first == "figure" || first == "fig" || first == "tabell" || first == "table"
+	return numbered && strings.IndexAny(b.Lines[0].Words[1].Text, "0123456789") >= 0
 }
 
 func firstOwned(owner []int, r int) int {

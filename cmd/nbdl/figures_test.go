@@ -101,3 +101,32 @@ func TestTextBlocksNoteNumbers(t *testing.T) {
 		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+// A legend OCR read as words, between a chart and its source, is part of
+// the chart, while its title stays text; so is a scale set under the
+// figure's number.
+func TestTextBlocksLegendInFrame(t *testing.T) {
+	long := "Dette er en lang linje med mange ord i seg som fortsetter"
+	body := blockOf(wordsLine(long, 350, 2000, 1960), wordsLine(long, 350, 2078, 1960), wordsLine(long, 350, 2156, 1960))
+	pg := &textPage{Width: 2409, Height: 3559, Blocks: []textBlock{
+		blockOf(wordsLine("FIGUR 1", 366, 408, 547)),
+		blockOf(wordsLine("Budsjettlekkasjen i offentlige utgifter,", 366, 513, 1200),
+			wordsLine("rebasert: oktoberbudsjett = O, milliarder kroner", 366, 586, 1400)),
+		{Lines: []textLine{{Box: rect{420, 700, 2030, 1700}}}, Box: rect{420, 700, 2030, 1700}},
+		blockOf(wordsLine("Statsbudsjett [saldert, des.) M Statsregnskap", 1320, 1750, 2050)),
+		blockOf(wordsLine("Kilde: Statsbudsjetter, SSB", 1500, 1850, 2090)),
+		body,
+	}}
+	got := blockTexts(textBlocks(pg, bookStats{bodyLH: 0.0126}))
+	want := []string{"FIGUR 1", "Budsjettlekkasjen i offentlige utgifter, rebasert: oktoberbudsjett = O, milliarder kroner",
+		"[picture]", "Kilde: Statsbudsjetter, SSB", textOf(body)}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	// A scale under the number is split off to join the chart.
+	parts := splitCaptions(blockOf(wordsLine("FIGUR 3a", 366, 408, 547), wordsLine("Minimum Medium Maksimum", 900, 470, 1900)))
+	if len(parts) != 2 || textOf(parts[0]) != "FIGUR 3a" || textOf(parts[1]) != "Minimum Medium Maksimum" {
+		t.Errorf("splitCaptions = %q", blockTexts(parts))
+	}
+}
