@@ -71,18 +71,18 @@ func readNoteRefs(ctx context.Context, d *downloader, book *Book, pages []layout
 			h := w.Box.H()
 			// The raised number ends the word, in its upper part.
 			region := rect{max(0, w.Box.X1-1.8*h), max(0, w.Box.Y0-0.3*h), min(pg.Width, w.Box.X1+0.3*h), w.Box.Y0 + 0.7*h}
-			text, err := readRegion(ctx, d, book, pg, jobs[j].page, region, dir, engines)
+			whole, cut, err := readRegion(ctx, d, book, pg, jobs[j].page, region, dir, engines, h)
 			if err != nil {
 				return err
 			}
-			read[j] = markerNumber(text)
+			read[j] = bestReading(markerNumber(whole), markerNumber(cut))
 			return nil
 		})
 	// What OCR made of a marker it did not read as a number may be left
 	// at the end of the word as a quote mark ("prosent.'"). A curly
 	// closing quote is such a remnant only in a book that never opens one,
 	// quoting with « » instead.
-	remnants := "'\"’?!*%"
+	remnants := "'\"’?!*%>"
 	curly := false
 	for _, lp := range pages {
 		eachWord(lp, func(w *textWord) { curly = curly || strings.ContainsRune(w.Text, '“') })
@@ -175,7 +175,7 @@ func readNoteNumbers(ctx context.Context, d *downloader, book *Book, pages []lay
 			if region.W() <= 0 {
 				return nil
 			}
-			text, err := readRegion(ctx, d, book, pg, jobs[j].page, region, dir, engines)
+			text, _, err := readRegion(ctx, d, book, pg, jobs[j].page, region, dir, engines, 0)
 			if err != nil {
 				return err
 			}
@@ -203,23 +203,39 @@ func readNoteNumbers(ctx context.Context, d *downloader, book *Book, pages []lay
 }
 
 // readRegion reads a part of a page image as a single line of text,
-// enlarged.
-func readRegion(ctx context.Context, d *downloader, book *Book, pg *textPage, page int, region rect, dir string, engines *lazyEngine) (string, error) {
+// enlarged. When raised is set, it also reads the raised number cut out
+// of it and returns that as well.
+func readRegion(ctx context.Context, d *downloader, book *Book, pg *textPage, page int, region rect, dir string, engines *lazyEngine, raised float64) (string, string, error) {
 	key := sha256.Sum256([]byte(fmt.Sprintf("%d %v", page, region)))
 	data, err := d.cachedImage(ctx, filepath.Join(dir, fmt.Sprintf("ref-%x.jpg", key[:8])), figureURL(book.Pages[page], pg, region, 0))
 	if err != nil {
-		return "", ctx.Err()
+		return "", "", ctx.Err()
 	}
 	img, err := jpeg.Decode(bytes.NewReader(data))
 	if err != nil {
-		return "", nil
+		return "", "", nil
 	}
+	gray := toGray(img)
+	whole, err := readLine(ctx, gray, dir, engines)
+	if err != nil || raised == 0 {
+		return whole, "", err
+	}
+	cut := raisedInk(gray, raised*float64(gray.Bounds().Dx())/region.W())
+	if cut == nil {
+		return whole, "", nil
+	}
+	part, err := readLine(ctx, cut, dir, engines)
+	return whole, part, err
+}
+
+// readLine reads an image as a single line of text, enlarged.
+func readLine(ctx context.Context, img *image.Gray, dir string, engines *lazyEngine) (string, error) {
 	f, err := os.CreateTemp(dir, "read-*.jpg")
 	if err != nil {
 		return "", err
 	}
 	defer os.Remove(f.Name())
-	err = jpeg.Encode(f, enlarge(toGray(img), 4, 60), &jpeg.Options{Quality: 95})
+	err = jpeg.Encode(f, enlarge(img, 4, 60), &jpeg.Options{Quality: 95})
 	f.Close()
 	if err != nil {
 		return "", err
@@ -245,6 +261,19 @@ func readRegion(ctx context.Context, d *downloader, book *Book, pg *textPage, pa
 	return text.String(), nil
 }
 
+// bestReading settles a marker's number from the reading of the word's
+// end and of the raised number cut out of it: the first, unless it found
+// nothing or only the last figures of the second ("3" for "53").
+func bestReading(whole, raised int) int {
+	if whole == 0 {
+		return raised
+	}
+	if raised != whole && raised > 0 && strings.HasSuffix(strconv.Itoa(raised), strconv.Itoa(whole)) {
+		return raised
+	}
+	return whole
+}
+
 // markerNumber takes the number at the end of what OCR read of a word's
 // end ("e.»36", ".»12O"), reading the round zero and the one of old-style
 // figures as the digits they are. Without a real digit, the run must
@@ -268,6 +297,73 @@ func markerNumber(s string) int {
 		return 0
 	}
 	return n
+}
+
+// raisedInk cuts the raised number out of a crop of a word's end: the
+// rightmost cluster of ink that stays clear of the text line, which the
+// word's letters reach down to. wordH is the word's height in pixels; the
+// crop runs from above the word to above the line's foot, so it cuts
+// through the letters. It returns nil when nothing is raised.
+func raisedInk(img *image.Gray, wordH float64) *image.Gray {
+	b := img.Bounds()
+	dark := uint8(max(0, paperLevel(img, b)-80))
+	type cluster struct{ x0, x1, y0, y1, ink int }
+	var cs []cluster
+	gap := max(2, int(0.12*wordH))
+	cur := cluster{x0: -1}
+	blank := 0
+	for x := b.Min.X; x <= b.Max.X; x++ {
+		inked, top, bottom, n := false, b.Max.Y, b.Min.Y, 0
+		if x < b.Max.X {
+			for y := b.Min.Y; y < b.Max.Y; y++ {
+				if img.GrayAt(x, y).Y < dark {
+					inked = true
+					top, bottom, n = min(top, y), max(bottom, y+1), n+1
+				}
+			}
+		}
+		if inked {
+			if cur.x0 < 0 {
+				cur = cluster{x0: x, y0: top, y1: bottom}
+			}
+			cur.x1, cur.y0, cur.y1, cur.ink = x+1, min(cur.y0, top), max(cur.y1, bottom), cur.ink+n
+			blank = 0
+			continue
+		}
+		blank++
+		if cur.x0 >= 0 && (blank > gap || x == b.Max.X) {
+			cs = append(cs, cur)
+			cur = cluster{x0: -1}
+		}
+	}
+	// Raised: clear of the bottom edge, which cuts through the letters of
+	// the line; and more than a speck.
+	minInk := int(0.02 * wordH * wordH)
+	raised := func(c cluster) bool { return c.y1 < b.Max.Y-1 && c.ink >= minInk }
+	last := -1
+	for i := len(cs) - 1; i >= 0; i-- {
+		if raised(cs[i]) {
+			last = i
+			break
+		}
+	}
+	if last < 0 {
+		return nil
+	}
+	r := image.Rect(cs[last].x0, cs[last].y0, cs[last].x1, cs[last].y1)
+	// Figures of one number set a little apart.
+	for i := last - 1; i >= 0 && raised(cs[i]) && cs[i+1].x0-cs[i].x1 <= int(0.35*wordH); i-- {
+		r = r.Union(image.Rect(cs[i].x0, cs[i].y0, cs[i].x1, cs[i].y1))
+	}
+	pad := max(2, int(0.1*wordH))
+	r = image.Rect(r.Min.X-pad, r.Min.Y-pad, r.Max.X+pad, r.Max.Y+pad).Intersect(b)
+	out := image.NewGray(image.Rect(0, 0, r.Dx(), r.Dy()))
+	for y := 0; y < r.Dy(); y++ {
+		for x := 0; x < r.Dx(); x++ {
+			out.SetGray(x, y, img.GrayAt(r.Min.X+x, r.Min.Y+y))
+		}
+	}
+	return out
 }
 
 // enlarge scales a small image up by factor, smoothing between pixels,
