@@ -72,6 +72,60 @@ func TestTextBlocksAssembleChart(t *testing.T) {
 		if b.Image && (b.Box.X0 > 484 || b.Box.Y0 > 750 || b.Box.Y1 < 1760) {
 			t.Errorf("chart %v leaves out its labels", b.Box)
 		}
+		// Nor does it show slivers of the title or the source.
+		if b.Image && (b.Box.Y0 < 725 || b.Box.Y1 > 1850) {
+			t.Errorf("chart %v overlaps the title or the source", b.Box)
+		}
+	}
+}
+
+// tableRow lays out a table row: a label at the left, figures far right.
+func tableRow(y float64, label string, figures ...string) textLine {
+	l := textLine{Words: []textWord{{Text: label, Conf: 0.95, Box: rect{362, y, 640, y + 25}}}}
+	for i, f := range figures {
+		x := 1300 + 300*float64(i)
+		l.Words = append(l.Words, textWord{Text: f, Conf: 0.95, Box: rect{x, y, x + 80, y + 25}})
+	}
+	l.Box = wordsBox(l.Words)
+	return l
+}
+
+// A table OCR read as text belongs to the picture of it, and a sentence
+// of the text that names a figure frames none.
+func TestTextBlocksTable(t *testing.T) {
+	long := "Dette er en lang linje med mange ord i seg som fortsetter"
+	body := func(y float64) textBlock {
+		return blockOf(wordsLine(long, 362, y, 2094), wordsLine(long, 362, y+66, 2094), wordsLine(long, 362, y+132, 2094))
+	}
+	pg := &textPage{Width: 2409, Height: 3559, Blocks: []textBlock{
+		body(400),
+		blockOf(wordsLine("TABELL 3", 362, 700, 585)),
+		blockOf(wordsLine("Skatteinntekter ved eksisterende og alternativ modell", 364, 760, 1987)),
+		blockOf(wordsLine("Dagens modell Alt. modell Forskjell", 1250, 880, 2000),
+			tableRow(950, "Inntektsskatt", "270", "84", "-186"),
+			tableRow(1010, "Trinnskatt", "69", "55", "-14"),
+			tableRow(1070, "Trygdeavgift", "138", "137", "-1")),
+		blockOf(wordsLine("Kilde: egne beregninger", 1786, 1180, 2094)),
+		body(1300),
+		blockOf(wordsLine("Figur 24 viser hva denne effekten utgjør i kroner", 362, 1600, 2094),
+			wordsLine("og øre for befolkningen.", 362, 1666, 900)),
+		blockOf(wordsLine("Fra 2014 til 2023 tapte banksparere i sum 270 milliarder", 362, 1760, 2094),
+			wordsLine("kroner på sin banksparing.", 362, 1826, 900)),
+	}}
+	st := bookStats{bodyLH: 0.0126}
+	got := blockTexts(textBlocks(pg, st))
+	want := []string{
+		long + " " + long + " " + long,
+		"TABELL 3",
+		"Skatteinntekter ved eksisterende og alternativ modell",
+		"[picture]",
+		"Kilde: egne beregninger",
+		long + " " + long + " " + long,
+		"Figur 24 viser hva denne effekten utgjør i kroner og øre for befolkningen.",
+		"Fra 2014 til 2023 tapte banksparere i sum 270 milliarder kroner på sin banksparing.",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 
@@ -158,5 +212,17 @@ func TestTextBlocksGapPicture(t *testing.T) {
 	want = []string{textOf(body(400)), "III.", textOf(body(1050))}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("section break: got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestLegendLikeBoxes(t *testing.T) {
+	for text, want := range map[string]bool{
+		"T 2013 (2024-kroner) Vekstitakt medFBNP M StabilandelavBNI M 2024 virkelig": true,
+		"Utviklingen i offentlige utgifter fra 2013 til 2024, millioner kroner":      false,
+		"Hvis land A har 10 % inflasjon og land B har 0 % inflasjon":                 false,
+	} {
+		if got := legendLike(blockOf(wordsLine(text, 300, 500, 2000))); got != want {
+			t.Errorf("legendLike(%q) = %v", text, got)
+		}
 	}
 }

@@ -328,6 +328,19 @@ func legendLike(b textBlock) bool {
 	if capitals >= 3 && float64(capitals) >= 0.6*float64(words) && !strings.Contains(textOf(b), ",") {
 		return true
 	}
+	// The boxes before a legend's entries, read as letters ("M 2024
+	// virkelig M Stabil andel"); "I" and "A" may be words.
+	boxes := 0
+	for _, l := range b.Lines {
+		for _, w := range l.Words {
+			if r := []rune(w.Text); len(r) == 1 && unicode.IsUpper(r[0]) && !strings.ContainsRune("IAÅ", r[0]) {
+				boxes++
+			}
+		}
+	}
+	if boxes >= 2 {
+		return true
+	}
 	for _, l := range b.Lines {
 		for _, w := range l.Words {
 			// A lone "=" belongs to titles ("indeks: 2020 = 100").
@@ -414,6 +427,18 @@ func splitLabels(b textBlock) []textBlock {
 
 // farGap returns the index of the first word after a gap far wider than
 // any space between words, or 0.
+// tableLike reports whether most lines of a block are rows of a table:
+// a label and, far to its right, a figure.
+func tableLike(b textBlock) bool {
+	rows := 0
+	for _, l := range b.Lines {
+		if farGap(l) > 0 && strings.ContainsAny(lineText(l), "0123456789") {
+			rows++
+		}
+	}
+	return len(b.Lines) >= 3 && 2*rows >= len(b.Lines)
+}
+
 func farGap(l textLine) int {
 	h := l.Box.H()
 	for i := 1; i < len(l.Words); i++ {
@@ -461,8 +486,11 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 	// A chart framed by a figure number and title above and its source
 	// below is everything between them that is not text, even where OCR
 	// found no drawing, only labels.
-	for _, band := range figureBands(blocks, role, col, lh) {
+	frame := map[int]rect{} // a framed chart's region fills its frame
+	for _, fb := range figureBands(blocks, role, col, lh) {
+		band := fb.blocks
 		first := band[0]
+		frame[first] = fb.frame
 		for _, k := range band {
 			if owner[k] >= 0 && owner[k] != first {
 				alive[owner[k]] = false
@@ -552,21 +580,36 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 	}
 
 	numbering := numberColumn(blocks, lh)
+	kept := make([]bool, len(blocks)) // blocks that stay text
+	for i, b := range blocks {
+		switch {
+		case owner[i] >= 0:
+		case numbering[i]:
+			// The numbers of a list of notes, set in a column of their own.
+		case role[i] == roleLabel && strayLabel(b):
+			// A label of a chart whose drawing OCR did not find.
+		default:
+			kept[i] = true
+		}
+	}
 	pad := figurePadding * lh
 	var out []textBlock
 	for i, b := range blocks {
 		r := owner[i]
 		switch {
-		case r < 0 && numbering[i]:
-			// The numbers of a list of notes, set in a column of their own.
-		case r < 0 && role[i] == roleLabel && strayLabel(b):
-			// A label of a chart whose drawing OCR did not find.
-		case r < 0:
+		case kept[i]:
 			out = append(out, b)
-		case firstOwned(owner, r) == i:
+		case r >= 0 && firstOwned(owner, r) == i:
 			rb := box[r]
+			if f, ok := frame[r]; ok {
+				rb = rb.union(f)
+			}
 			rb = rect{max(0, rb.X0-pad), max(0, rb.Y0-pad), min(pg.Width, rb.X1+pad), min(pg.Height, rb.Y1+pad)}
-			out = append(out, textBlock{Box: rb, Image: true})
+			chart := box[r]
+			if f, ok := frame[r]; ok {
+				chart = chart.union(f)
+			}
+			out = append(out, textBlock{Box: clearOfText(rb, chart, blocks, kept, lh), Image: true})
 		}
 	}
 	// OCR sometimes reads a picture before the caption printed above it.
@@ -586,6 +629,40 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 		}
 	}
 	return out
+}
+
+// clearOfText moves a picture's top and bottom edges off the text kept
+// above and below it, such as the caption and the source line, so the
+// picture shows no slivers of lines that are also in the text. An edge is
+// moved only as far as the chart itself allows.
+func clearOfText(rb, chart rect, blocks []textBlock, kept []bool, lh float64) rect {
+	mid := (chart.Y0 + chart.Y1) / 2
+	for i, b := range blocks {
+		if !kept[i] || b.Image {
+			continue
+		}
+		overlap := min(b.Box.X1, rb.X1) - max(b.Box.X0, rb.X0)
+		if overlap < b.Box.W()/2 || b.Box.Y1 <= rb.Y0 || b.Box.Y0 >= rb.Y1 {
+			continue
+		}
+		// A small margin off the text, but not into the chart unless the
+		// text itself reaches into it.
+		switch {
+		case b.Box.Y1 <= mid && b.Box.Y1 < chart.Y0+chart.H()/4:
+			y := b.Box.Y1 + lh/4
+			if b.Box.Y1 <= chart.Y0 {
+				y = min(y, chart.Y0)
+			}
+			rb.Y0 = max(rb.Y0, y)
+		case b.Box.Y0 >= mid && b.Box.Y0 > chart.Y1-chart.H()/4:
+			y := b.Box.Y0 - lh/4
+			if b.Box.Y0 >= chart.Y1 {
+				y = max(y, chart.Y1)
+			}
+			rb.Y1 = min(rb.Y1, y)
+		}
+	}
+	return rb
 }
 
 // numberColumn marks lone numbers stacked at one left edge, three or more
@@ -618,40 +695,59 @@ func numberColumn(blocks []textBlock, lh float64) []bool {
 // figureBands returns, for each figure numbered above ("FIGUR 31") with
 // its source named below ("Kilder: ..."), the blocks between its title and
 // its source that are not text, in order.
-func figureBands(blocks []textBlock, role []int, col rect, lh float64) [][]int {
-	var bands [][]int
+// figureBand is the blocks of a chart framed by its number and title above
+// and its source below, and the frame: the column's width between them.
+type figureBand struct {
+	blocks []int
+	frame  rect
+}
+
+func figureBands(blocks []textBlock, role []int, col rect, lh float64) []figureBand {
+	var bands []figureBand
 	for i, b := range blocks {
-		if len(b.Lines) > 2 || !figureNumber(b) {
+		// The number on a short line of its own, not a sentence of the
+		// text that names a figure ("Figur 24 viser ...").
+		if len(b.Lines) > 2 || !figureNumber(b) || len(b.Lines[0].Words) > 3 {
 			continue
 		}
 		// The title: text right below the number.
 		top := b.Box.Y1
-		for j := i + 1; j < len(blocks) && role[j] == roleText && !caption(blocks[j]) && blocks[j].Box.Y0-top < 3*lh; j++ {
+		for j := i + 1; j < len(blocks) && role[j] == roleText && !caption(blocks[j]) && !legendLike(blocks[j]) && !tableLike(blocks[j]) && blocks[j].Box.Y0-top < 3*lh; j++ {
 			top = blocks[j].Box.Y1
 		}
 		// The chart ends at its source or, without one, at the running
 		// text that follows.
 		bottom := -1.0
+		width := col // a source line set flush with the chart's right edge widens it
 		for j := i + 1; j < len(blocks); j++ {
-			if (caption(blocks[j]) && !figureNumber(blocks[j]) || bodyText(blocks[j], col)) && blocks[j].Box.Y0 > top {
+			if (caption(blocks[j]) || bodyText(blocks[j], col)) && blocks[j].Box.Y0 > top {
 				bottom = blocks[j].Box.Y0
+				width = width.union(blocks[j].Box)
 				break
 			}
 		}
-		if bottom < 0 {
-			continue
+		toEnd := bottom < 0
+		if toEnd {
+			// A chart filling the rest of the page.
+			bottom = col.Y1 + lh
 		}
 		// Inside the frame, short text is part of the chart too: a
 		// legend OCR read as words ("Statsbudsjett M Statsregnskap").
 		var band []int
 		for j, c := range blocks {
-			legend := role[j] == roleText && len(c.Lines) <= 2 && !caption(c) && !figureNumber(c) && !bodyText(c, col)
+			// So is a table's text, which is not prose.
+			legend := role[j] == roleText && !caption(c) && !figureNumber(c) && !bodyText(c, col) &&
+				(len(c.Lines) <= 2 || !prose(c, col) || tableLike(c))
 			if (role[j] != roleText || legend) && c.Box.Y0 >= top && c.Box.Y1 <= bottom {
 				band = append(band, j)
 			}
 		}
-		if len(band) > 0 {
-			bands = append(bands, band)
+		drawn := false
+		for _, j := range band {
+			drawn = drawn || role[j] != roleText
+		}
+		if len(band) > 0 && (drawn || !toEnd) {
+			bands = append(bands, figureBand{band, rect{width.X0, top + lh/4, width.X1, bottom - lh/4}})
 		}
 	}
 	return bands
