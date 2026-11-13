@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -97,6 +98,9 @@ func saveEPUB(ctx context.Context, d *downloader, book *Book, identifier, outPat
 	}
 	if n := readNoteRefs(ctx, d, book, pages, dir, engine, opts.workers, report); n > 0 {
 		fmt.Fprintf(os.Stderr, "\nread %d note references\n", n)
+	}
+	if n := dropRemnants(pages); n > 0 {
+		fmt.Fprintf(os.Stderr, "removed %d unreadable note markers\n", n)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -225,11 +229,15 @@ func saveEPUB(ctx context.Context, d *downloader, book *Book, identifier, outPat
 }
 
 // kindOf tells covers and the spine from text pages by nb.no's page ids.
+// Pages scanned from the dust jacket (_V01, _V02, ...) are kept as pictures
+// like the back cover: their text is set around photos and quotes.
+var jacketPage = regexp.MustCompile(`_V\d+$`)
+
 func kindOf(id string) pageKind {
 	switch {
 	case strings.HasSuffix(id, "_C1"):
 		return pageCover
-	case strings.HasSuffix(id, "_C3"):
+	case strings.HasSuffix(id, "_C3") || jacketPage.MatchString(id):
 		return pageBack
 	case strings.HasSuffix(id, "_C2"):
 		return pageSkip

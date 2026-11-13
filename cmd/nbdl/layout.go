@@ -468,11 +468,12 @@ func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 				switch {
 				case prev == nil && st.top > 0 && b.Box.Y0/pg.Height > st.top+sinkDepth && hasRealWord([]textBlock{b}):
 					paras = append(paras, para{kind: "chapter", page: i})
-				case prev != nil && !prev.Image && !caption(*prev) && !caption(b) && st.bodyLH > 0 &&
+				case prev != nil && !prev.Image && !caption(*prev) && !caption(b) && !(bi >= 2 && blocks[bi-2].Image) && st.bodyLH > 0 &&
 					b.Box.Y0-prev.Box.Y1 > breakGap*st.bodyLH*pg.Height && len(paras) > 0 && paras[len(paras)-1].kind == "p":
 					// Only a gap between two stretches of body text is a
 					// scene break; space around pictures and their
-					// captions and after headings is layout.
+					// captions (the text right under a picture) and after
+					// headings is layout.
 					paras = append(paras, para{kind: "break", page: i})
 				}
 			}
@@ -531,6 +532,11 @@ func layoutBook(pages []layoutPage) ([]epubChapter, []figureRef) {
 		}
 	}
 	paras = mergeContinued(paras)
+	for i := range paras {
+		if paras[i].kind == "p" || paras[i].kind == "note" {
+			paras[i].text = fixPrepositionI(paras[i].text)
+		}
+	}
 	noteNums := numberNotes(paras, func(p para) bool { return notes[p.page] })
 	for i := range paras {
 		paras[i].text = fixOCR(paras[i].text)
@@ -625,6 +631,12 @@ var countingWords = map[string]bool{
 func endsLowerLetter(s string) bool {
 	r := []rune(stripRefs(s))
 	return len(r) > 0 && unicode.IsLower(r[len(r)-1])
+}
+
+// midSentence tells whether text stops where a sentence cannot end.
+func midSentence(s string) bool {
+	s = strings.TrimSpace(stripRefs(s))
+	return endsLowerLetter(s) || strings.HasSuffix(s, ",")
 }
 
 func startsUpper(s string) bool {
@@ -898,7 +910,7 @@ func appendWord(b *strings.Builder, word string) {
 	if strings.HasSuffix(s, "-") || strings.HasSuffix(s, "¬") {
 		lastSpace := strings.LastIndex(s, " ")
 		prefix := strings.TrimRight(s[lastSpace+1:], "-¬")
-		if prefix != "" && startsLower(word) {
+		if prefix != "" && startsLower(word) && !suspends(word) {
 			trimmed := strings.TrimRight(s, "-¬")
 			b.Reset()
 			b.WriteString(trimmed)
@@ -911,6 +923,16 @@ func appendWord(b *strings.Builder, word string) {
 	}
 	b.WriteString(" ")
 	b.WriteString(word)
+}
+
+// suspends tells whether a word after a hyphen shows the hyphen ends a
+// shortened compound, as in "skole- og barnehage", not a broken word.
+func suspends(word string) bool {
+	switch word {
+	case "og", "eller", "samt", "and", "or":
+		return true
+	}
+	return false
 }
 
 // keepHyphen keeps hyphens that belong to the word, as in "EU-landene" or
@@ -951,6 +973,15 @@ func mergeContinued(paras []para) []para {
 		if n := len(out); n > 0 && p.kind == "p" && out[n-1].kind == "break" && startsLower(p.text) {
 			out = out[:n-1]
 		}
+		// A source line or other small print OCR split at a line end.
+		if n := len(out); n > 0 && p.kind == "note" && out[n-1].kind == "note" && out[n-1].page == p.page &&
+			(midSentence(out[n-1].text) || !endsSentence(out[n-1].text) && startsLower(p.text)) {
+			var b strings.Builder
+			b.WriteString(out[n-1].text)
+			appendWord(&b, p.text)
+			out[n-1].text = b.String()
+			continue
+		}
 		if n := len(out); n > 0 && p.kind == "p" {
 			// Look past figures and footnotes, which sit between the halves
 			// of a paragraph broken across pages.
@@ -965,7 +996,12 @@ func mergeContinued(paras []para) []para {
 				// line of body text set a little large.
 				prev.kind = "p"
 			}
-			if (prev.kind == "p" || prev.kind == "endnote") && continues {
+			// Over a page turn, a paragraph broken off after a lower-case
+			// word or a comma goes on even with a name or a number; so does
+			// a note, wherever OCR split it, and after a colon too.
+			turned := (p.page > prev.page || prev.kind == "endnote") && midSentence(prev.text) ||
+				prev.kind == "endnote" && startsLower(p.text) && strings.HasSuffix(strings.TrimSpace(stripRefs(prev.text)), ":")
+			if (prev.kind == "p" || prev.kind == "endnote") && (continues || turned) {
 				var b strings.Builder
 				b.WriteString(prev.text)
 				appendWord(&b, p.text)

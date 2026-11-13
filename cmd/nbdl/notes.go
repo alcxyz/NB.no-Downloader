@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -64,6 +65,7 @@ func readNoteRefs(ctx context.Context, d *downloader, book *Book, pages []layout
 		return 0
 	}
 	read := make([]int, len(jobs))
+	alts := make([][]int, len(jobs))
 	_ = parallel(ctx, len(jobs), workers, func(done, total int) { report("Reading note references", done, total) },
 		func(ctx context.Context, j int) error {
 			pg := pages[jobs[j].page].Text
@@ -75,9 +77,10 @@ func readNoteRefs(ctx context.Context, d *downloader, book *Book, pages []layout
 			if err != nil {
 				return err
 			}
-			read[j] = bestReading(markerNumber(whole), markerNumber(cut))
+			read[j], alts[j] = bestReading(markerNumber(whole), markerNumber(cut))
 			return nil
 		})
+	settleReadings(read, alts)
 	// What OCR made of a marker it did not read as a number may be left
 	// at the end of the word as a quote mark ("prosent.'"). A curly
 	// closing quote is such a remnant only in a book that never opens one,
@@ -262,16 +265,56 @@ func readLine(ctx context.Context, img *image.Gray, dir string, engines *lazyEng
 }
 
 // bestReading settles a marker's number from the reading of the word's
-// end and of the raised number cut out of it: the first, unless it found
-// nothing or only the last figures of the second ("3" for "53").
-func bestReading(whole, raised int) int {
-	if whole == 0 {
-		return raised
+// end and of the raised number cut out of it. It is sure when they agree,
+// when one found nothing, or when one holds only the last figures of the
+// other ("3" for "53"). Otherwise both are candidates for settleReadings.
+func bestReading(whole, raised int) (sure int, alts []int) {
+	w, r := strconv.Itoa(whole), strconv.Itoa(raised)
+	switch {
+	case whole == 0 || whole == raised:
+		return raised, nil
+	case raised == 0 || strings.HasSuffix(w, r):
+		return whole, nil
+	case strings.HasSuffix(r, w):
+		return raised, nil
 	}
-	if raised != whole && raised > 0 && strings.HasSuffix(strconv.Itoa(raised), strconv.Itoa(whole)) {
-		return raised
+	return 0, []int{whole, raised}
+}
+
+// settleReadings picks, for each marker whose readings disagree, the
+// candidate that falls between the sure numbers before and after it, and
+// leaves the marker unread when none or both do.
+func settleReadings(sure []int, alts [][]int) {
+	known := append([]int(nil), sure...)
+	for j, cands := range alts {
+		if len(cands) == 0 {
+			continue
+		}
+		prev, next := 0, math.MaxInt
+		for k := j - 1; k >= 0; k-- {
+			if known[k] > 0 {
+				prev = known[k]
+				break
+			}
+		}
+		for k := j + 1; k < len(known); k++ {
+			if known[k] > 0 {
+				next = known[k]
+				break
+			}
+		}
+		fit := 0
+		for _, c := range cands {
+			if c > prev && c < next {
+				if fit != 0 {
+					fit = 0
+					break
+				}
+				fit = c
+			}
+		}
+		sure[j] = fit
 	}
-	return whole
 }
 
 // markerNumber takes the number at the end of what OCR read of a word's
@@ -288,8 +331,13 @@ func markerNumber(s string) int {
 	if run == "" {
 		return 0
 	}
-	before, _ := utf8.DecodeLastRuneInString(s[:start])
+	before, size := utf8.DecodeLastRuneInString(s[:start])
 	if !strings.ContainsAny(run, "0123456789") && !strings.ContainsRune(".,;:»”\")!?*", before) {
+		return 0
+	}
+	// A "!" after the end of the sentence is a figure misread, so the
+	// number is not all there (".!9" for 10).
+	if gone, _ := utf8.DecodeLastRuneInString(s[:start-size]); before == '!' && strings.ContainsRune(".,;:»”\")?", gone) {
 		return 0
 	}
 	n, err := strconv.Atoi(strings.NewReplacer("o", "0", "O", "0", "l", "1", "I", "1", "|", "1").Replace(run))
@@ -649,7 +697,7 @@ func numberNotes(paras []para, inNotes func(p para) bool) map[int]bool {
 	// of numbers ("An a w") hold no word and are none.
 	var idx []int
 	for i, p := range paras {
-		if inNotes(p) && (p.kind == "endnote" || p.kind == "p" && realWord.MatchString(p.text)) {
+		if inNotes(p) && (p.kind == "endnote" || (p.kind == "p" || p.kind == "note") && realWord.MatchString(p.text)) {
 			idx = append(idx, i)
 		}
 	}
@@ -670,7 +718,7 @@ func numberNotes(paras []para, inNotes func(p para) bool) map[int]bool {
 				break
 			}
 		}
-		if p.note == prev+1 || p.note == prev+1+pending ||
+		if p.note > prev && p.note <= prev+1+pending ||
 			p.note > prev && next == p.note+1 && (prev == 0 || p.note <= prev+15) {
 			prev, pending = p.note, 0
 			continue
@@ -680,16 +728,27 @@ func numberNotes(paras []para, inNotes func(p para) bool) map[int]bool {
 		p.text = strconv.Itoa(p.note) + " " + p.text
 		p.note = 0
 	}
-	// Fill gaps whose size matches.
+	// Fill gaps whose size matches, counting either every paragraph or
+	// only those that look like the start of a note.
 	last := 0
 	var gap []int
 	for _, i := range idx {
 		p := &paras[i]
-		if p.kind == "p" {
+		if p.kind != "endnote" {
 			gap = append(gap, i)
 			continue
 		}
-		if len(gap) == p.note-last-1 {
+		missing := p.note - last - 1
+		if len(gap) != missing {
+			var starts []int
+			for _, g := range gap {
+				if noteStart(paras, g) {
+					starts = append(starts, g)
+				}
+			}
+			gap = starts
+		}
+		if len(gap) == missing {
 			for k, g := range gap {
 				paras[g].kind, paras[g].note = "endnote", last+1+k
 			}
@@ -703,6 +762,12 @@ func numberNotes(paras []para, inNotes func(p para) bool) map[int]bool {
 		}
 	}
 	return nums
+}
+
+// noteStart tells whether a paragraph looks like a note of its own: it
+// opens with a capital after a paragraph that ended a sentence.
+func noteStart(paras []para, i int) bool {
+	return i > 0 && startsUpper(paras[i].text) && endsSentence(paras[i-1].text) && !strings.HasSuffix(strings.TrimSpace(stripRefs(paras[i-1].text)), ":")
 }
 
 var realWord = regexp.MustCompile(`\pL{3}`)
@@ -799,4 +864,47 @@ func linkAcross(chapters []epubChapter) {
 			return m
 		})
 	}
+}
+
+// remnantTail matches what OCR made of a note marker it did not read as a
+// number at the end of a word: "eksportsektor.”", "økonomi*”",
+// "inntekter.*%8", "sommeren.\"s". A trailing comma or colon is kept.
+var remnantTail = regexp.MustCompile(`^(.*[\p{L}\p{N}.;:)»?!])([”"*][”"*'’%?!:;+s]*\d*)([,;:]?)$`)
+
+// dropRemnants removes marker remnants from the ends of words in a book that
+// quotes with « », where a double quote or a star never ends a word. Words
+// that open a quote of their own are left alone, and so are the notes.
+func dropRemnants(pages []layoutPage) int {
+	guillemets, other := 0, false
+	for _, lp := range pages {
+		eachWord(lp, func(w *textWord) {
+			guillemets += strings.Count(w.Text, "«")
+			other = other || strings.ContainsAny(w.Text, "“„")
+		})
+	}
+	if guillemets < 10 || other {
+		return 0
+	}
+	notes := notesPages(pages, measureBook(pages))
+	n := 0
+	for i, lp := range pages {
+		if lp.Kind != pageNormal || notes[i] {
+			continue
+		}
+		eachWord(lp, func(w *textWord) {
+			if t := withoutRemnant(w.Text); t != w.Text {
+				w.Text = t
+				n++
+			}
+		})
+	}
+	return n
+}
+
+func withoutRemnant(word string) string {
+	m := remnantTail.FindStringSubmatch(word)
+	if m == nil || strings.ContainsAny(m[1], `”"`) {
+		return word
+	}
+	return m[1] + m[3]
 }

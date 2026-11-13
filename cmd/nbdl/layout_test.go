@@ -104,6 +104,8 @@ func TestJoinLinesHyphens(t *testing.T) {
 		{[]textLine{line("EU-"), line("landene")}, "EU-landene"},
 		{[]textLine{line("1990-"), line("tallet")}, "1990-tallet"},
 		{[]textLine{line("Oslo-"), line("Bergen")}, "Oslo- Bergen"},
+		{[]textLine{line("Skole-", "og"), line("barnehage")}, "Skole- og barnehage"},
+		{[]textLine{line("kapital-"), line("og", "arbeid")}, "kapital- og arbeid"},
 	}
 	for _, tt := range tests {
 		if got := joinLines(tt.lines); got != tt.want {
@@ -443,5 +445,80 @@ func TestWithoutFigures(t *testing.T) {
 	got := withoutFigures(chs, []string{"p0003-1.jpg", "p0009.jpg"})
 	if len(got) != 1 || got[0].Body != "<p>Tekst</p>\n<p>Mer</p>\n" {
 		t.Errorf("withoutFigures = %+v", got)
+	}
+}
+
+func TestMergeContinuedPageTurn(t *testing.T) {
+	out := mergeContinued([]para{
+		{kind: "p", text: "Det samlede tallet på", page: 4},
+		{kind: "p", text: "469 i Norge, og familier i", page: 5},
+		{kind: "p", text: "Norge, som før.", page: 6},
+		{kind: "p", text: "Ny avsnitt", page: 6},
+		{kind: "h1", text: "Fra olje til fond", page: 6},
+		{kind: "p", text: "Norge er rikt.", page: 7},
+		{kind: "p", text: "Slutt på siden", page: 7},
+		{kind: "p", text: "Ny side.", page: 7},
+	})
+	var got []string
+	for _, p := range out {
+		got = append(got, p.kind+":"+p.text)
+	}
+	want := "p:Det samlede tallet på 469 i Norge, og familier i Norge, som før.|p:Ny avsnitt|h1:Fra olje til fond|p:Norge er rikt.|p:Slutt på siden|p:Ny side."
+	if strings.Join(got, "|") != want {
+		t.Errorf("got  %q\nwant %q", strings.Join(got, "|"), want)
+	}
+}
+
+func TestMergeContinuedSmallPrint(t *testing.T) {
+	out := mergeContinued([]para{
+		{kind: "note", text: "Kilde: Federal Reserve Economic Data basert på data fra Bank for", page: 3},
+		{kind: "note", text: "International Settlements, Dataserie RBNOBIS", page: 3},
+		{kind: "note", text: "Kilde: SSB.", page: 3},
+		{kind: "note", text: "Kilde: OECD.", page: 3},
+	})
+	if len(out) != 3 || out[0].text != "Kilde: Federal Reserve Economic Data basert på data fra Bank for International Settlements, Dataserie RBNOBIS" {
+		t.Errorf("got %+v", out)
+	}
+}
+
+func TestFixPrepositionI(t *testing.T) {
+	for in, want := range map[string]string{
+		"TK Whitaker var født 1 1916 og var sjef.":            "TK Whitaker var født i 1916 og var sjef.",
+		"en økning 1I beskatningen av det som er igjen":       "en økning i beskatningen av det som er igjen",
+		"det var en økonomi I rask utvikling i landet":        "det var en økonomi i rask utvikling i landet",
+		"og valget 12005 var det som avgjorde":                "og valget i 2005 var det som avgjorde",
+		"det er 12000 år siden isen gikk":                     "det er 12000 år siden isen gikk",
+		"han gikk fra dag 1 til dag 2 i løpet av året":        "han gikk fra dag 1 til dag 2 i løpet av året",
+		"det er modell 1 som er den beste av dem":             "det er modell 1 som er den beste av dem",
+		"det er gitt utdelende, 1 motsetning til det som var": "det er gitt utdelende, i motsetning til det som var",
+		"det var Kong Olav I som styrte og det var godt":      "det var Kong Olav I som styrte og det var godt",
+		"and then I will say that it is the end of it":        "and then I will say that it is the end of it",
+		"det er bare 1 prosent som har det slik":              "det er bare 1 prosent som har det slik",
+		"en ny jobb 1 Norge er det som teller":                "en ny jobb i Norge er det som teller",
+	} {
+		if got := fixPrepositionI(in); got != want {
+			t.Errorf("fixPrepositionI(%q)\n = %q\nwant %q", in, got, want)
+		}
+	}
+}
+
+// The space under a photo's caption is layout, not a scene break, though
+// the caption names no figure; the same space between paragraphs is one.
+func TestNoBreakAfterPhotoCaption(t *testing.T) {
+	long := "Dette er en lang linje med mange ord i seg som fortsetter"
+	body := func(y float64, last string) textBlock {
+		return blockOf(wordsLine(long, 362, y, 2094), wordsLine(long, 362, y+66, 2094), wordsLine(last, 362, y+132, 1200))
+	}
+	photo := textBlock{Lines: []textLine{{Box: rect{362, 700, 2094, 1500}}}, Box: rect{362, 700, 2094, 1500}}
+	pg := &textPage{Width: 2409, Height: 3559, Blocks: []textBlock{
+		body(400, "slutt på avsnittet."),
+		photo,
+		blockOf(wordsLine("Arkeologiske utgravingsplasser, alle årstall før vår tidsregning.", 362, 1530, 1700)),
+		body(1800, "slutt på avsnittet."),
+		body(2150, "slutt."),
+	}}
+	chs, _ := layoutBook([]layoutPage{{Text: pg}})
+	if n := strings.Count(chs[0].Body, "<hr"); n != 1 {
+		t.Errorf("%d scene breaks, want 1 (between the two last paragraphs):\n%s", n, chs[0].Body)
 	}
 }

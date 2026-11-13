@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -16,6 +17,8 @@ func TestMarkerNumber(t *testing.T) {
 		"også":    0,
 		"lo":      0, // letters, not after punctuation
 		"1234":    0,
+		"ler.!9":  0, // a figure read as "!"
+		"wow!9":   9,
 	} {
 		if got := markerNumber(in); got != want {
 			t.Errorf("markerNumber(%q) = %d, want %d", in, got, want)
@@ -133,11 +136,53 @@ func TestLinkAcross(t *testing.T) {
 }
 
 func TestBestReading(t *testing.T) {
-	for _, c := range []struct{ whole, raised, want int }{
-		{120, 0, 120}, {0, 16, 16}, {3, 53, 53}, {38, 28, 38}, {0, 0, 0}, {44, 4, 44},
+	for _, c := range []struct {
+		whole, raised, want int
+		alts                bool
+	}{
+		{120, 0, 120, false}, {0, 16, 16, false}, {3, 53, 53, false}, {44, 4, 44, false},
+		{12, 12, 12, false}, {0, 0, 0, false}, {34, 14, 0, true},
 	} {
-		if got := bestReading(c.whole, c.raised); got != c.want {
-			t.Errorf("bestReading(%d, %d) = %d, want %d", c.whole, c.raised, got, c.want)
+		got, alts := bestReading(c.whole, c.raised)
+		if got != c.want || (alts != nil) != c.alts {
+			t.Errorf("bestReading(%d, %d) = %d, %v", c.whole, c.raised, got, alts)
 		}
+	}
+}
+
+func TestSettleReadings(t *testing.T) {
+	sure := []int{12, 0, 16, 22, 0, 24, 69, 0, 76, 0}
+	alts := [][]int{nil, {34, 14}, nil, nil, {33, 23}, nil, nil, {71, 73}, nil, {5, 6}}
+	settleReadings(sure, alts)
+	want := []int{12, 14, 16, 22, 23, 24, 69, 0, 76, 0}
+	for i := range want {
+		if sure[i] != want[i] {
+			t.Fatalf("settled %v, want %v", sure, want)
+		}
+	}
+}
+
+func TestNumberNotesGapsWithSplitNotes(t *testing.T) {
+	paras := mergeContinued([]para{
+		{kind: "endnote", note: 1, text: "Wicks: «The impact on western Scotland:", page: 1},
+		{kind: "p", text: "a Bayesian analysis», 2014.", page: 1}, // the rest of note 1
+		{kind: "p", text: "By DeWikiMan, 2008.", page: 1},
+		{kind: "endnote", note: 3, text: "Denne formuleringen.", page: 1},
+		{kind: "p", text: "Allentoft: «Population Genomics», 2022.", page: 1},
+		{kind: "endnote", note: 5, text: "Günther: «Population genomics of", page: 1},
+		{kind: "p", text: "Mesolithic Scandinavia», 2018.", page: 1}, // OCR split the note
+		{kind: "p", text: "Wikipedia.", page: 1},
+		{kind: "note", text: "Databasen i Family Tree DNA.", page: 1},
+		{kind: "p", text: "Kart hentet fra nettet.", page: 1},
+		{kind: "endnote", note: 9, text: "Cohn, 2019.", page: 1},
+	})
+	numberNotes(paras, func(para) bool { return true })
+	var got []string
+	for _, p := range paras {
+		got = append(got, strconv.Itoa(p.note)+" "+strings.Fields(p.text)[0])
+	}
+	want := "1 Wicks:|2 By|3 Denne|4 Allentoft:|5 Günther:|6 Wikipedia.|7 Databasen|8 Kart|9 Cohn,"
+	if strings.Join(got, "|") != want {
+		t.Errorf("got  %s\nwant %s", strings.Join(got, "|"), want)
 	}
 }

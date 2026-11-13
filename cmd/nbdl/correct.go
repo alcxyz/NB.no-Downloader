@@ -268,3 +268,83 @@ func splitRunOn(word string, vocab map[string]int) []string {
 	}
 	return parts
 }
+
+// The Norwegian preposition "i", one thin letter, is the word OCR misreads
+// most: as "1", "I", "1I" or "iI", or run into the year after it ("12005").
+// fixPrepositionI puts it back where the words around it leave no doubt,
+// in Norwegian text only.
+var (
+	iMisreads = map[string]bool{"1I": true, "iI": true, "Ii": true, "1i": true, "i1": true, "lI": true, "Il": true}
+	// Words "i" comes before far more often than the figure one.
+	iBefore = wordSet("stedet takt forhold praksis motsetning snitt sum tillegg løpet perioden form " +
+		"utgangspunktet seg all starten slutten hovedsak realiteten stor fremtiden fjor en et den det de " +
+		"dette denne disse flere mange alle hele våre vår sin sitt sine norsk norske " +
+		"Norge Sverige Danmark Finland Europa Oslo USA OECD Tyskland Storbritannia Kina")
+	// Words a figure one or a numeral I follows: "dag 1", "del I".
+	numbered = wordSet("dag del modell fase epoke nivå steg kapittel figur tabell nr. nummer prosjekt " +
+		"side punkt trinn runde tak uke versjon type klasse gruppe scenario alternativ verdenskrig")
+	// Words that follow a number, not a year: "12000 år".
+	countable = wordSet("år kroner kr mennesker personer km meter tonn dollar euro prosent % f.Kr. fvt. evt. e.Kr.")
+	// Norwegian and English words, to tell the languages apart, and English
+	// words that follow the pronoun I.
+	norskWords   = wordSet("og er det som på av ikke med til har en et den i at fra var")
+	englishWords = wordSet("the and of to is that was it with are be in on")
+	afterPronoun = wordSet("will have am was think can do would had could did believe know want said see")
+)
+
+func wordSet(s string) map[string]bool {
+	m := map[string]bool{}
+	for _, w := range strings.Fields(s) {
+		m[w] = true
+	}
+	return m
+}
+
+func fixPrepositionI(text string) string {
+	words := strings.Split(text, " ")
+	no, en := 0, 0
+	for _, w := range words {
+		w = strings.ToLower(strings.Trim(stripRefs(w), ".,;:«»()"))
+		if norskWords[w] {
+			no++
+		}
+		if englishWords[w] {
+			en++
+		}
+	}
+	if no <= en {
+		return text
+	}
+	for k := 1; k+1 < len(words); k++ {
+		w, prev, next := words[k], words[k-1], words[k+1]
+		clause := strings.HasSuffix(prev, ",") || strings.HasSuffix(prev, ";")
+		plain := startsLower(prev) && endsLowerLetter(prev) // a lower-case word, no punctuation
+		if !clause && !plain || numbered[strings.ToLower(prev)] {
+			continue
+		}
+		bare := strings.TrimRight(stripRefs(next), ".,;:)")
+		switch {
+		case iMisreads[w]:
+			words[k] = "i"
+		case w == "1" && (isYear(bare, 1000) || iBefore[bare] || clause && startsLower(next)):
+			words[k] = "i"
+		case w == "I" && !afterPronoun[bare] && (startsLower(next) || isYear(bare, 1000) || iBefore[bare]):
+			words[k] = "i"
+		case len(w) == 5 && w[0] == '1' && isYear(w[1:], 1800) && !countable[bare]:
+			words[k] = "i " + w[1:]
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+// isYear tells whether s is a year from first to 2099.
+func isYear(s string, first int) bool {
+	if len(s) != 4 || strings.Trim(s, "0123456789") != "" {
+		return false
+	}
+	y := 0
+	for _, r := range s {
+		y = y*10 + int(r-'0')
+	}
+	return y >= first && y <= 2099
+}

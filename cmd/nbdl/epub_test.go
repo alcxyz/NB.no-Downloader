@@ -368,3 +368,17 @@ func TestEPUBCheck(t *testing.T) {
 		}
 	}
 }
+
+func TestKindOf(t *testing.T) {
+	for id, want := range map[string]pageKind{
+		"URN:NBN:no-nb_digibok_2008_C1":   pageCover,
+		"URN:NBN:no-nb_digibok_2008_C3":   pageBack,
+		"URN:NBN:no-nb_digibok_2008_V01":  pageBack,
+		"URN:NBN:no-nb_digibok_2008_I1":   pageNormal,
+		"URN:NBN:no-nb_digibok_2008_0012": pageNormal,
+	} {
+		if got := kindOf(id); got != want {
+			t.Errorf("kindOf(%q) = %v, want %v", id, got, want)
+		}
+	}
+}
