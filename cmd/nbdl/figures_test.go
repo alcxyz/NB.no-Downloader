@@ -226,3 +226,15 @@ func TestLegendLikeBoxes(t *testing.T) {
 		}
 	}
 }
+
+func TestJoinBrokenLines(t *testing.T) {
+	blocks := joinBrokenLines([]textBlock{
+		blockOf(wordsLine("FIGUR 14", 319, 408, 532)),
+		blockOf(wordsLine("Rollen til offentlige utgifter i Norge, år 1995-2024,", 321, 489, 1386)),
+		blockOf(wordsLine("milliarder kroner", 321, 535, 667)),
+		blockOf(wordsLine("2750", 415, 600, 491)),
+	}, 45)
+	if got := strings.Join(blockTexts(blocks), "|"); got != "FIGUR 14|Rollen til offentlige utgifter i Norge, år 1995-2024, milliarder kroner|2750" {
+		t.Errorf("got %q", got)
+	}
+}

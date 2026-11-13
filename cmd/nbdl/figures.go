@@ -427,6 +427,33 @@ func splitLabels(b textBlock) []textBlock {
 
 // farGap returns the index of the first word after a gap far wider than
 // any space between words, or 0.
+// joinBrokenLines puts back a line OCR set apart from the line above it
+// that ends with a comma, such as the end of a chart's title ("1993-2022",
+// "milliarder kroner"), which would otherwise pass for a label.
+func joinBrokenLines(blocks []textBlock, lh float64) []textBlock {
+	for i := 0; i < len(blocks); i++ {
+		b := &blocks[i]
+		if b.Image || len(b.Lines) == 0 || !strings.HasSuffix(strings.TrimSpace(lineText(b.Lines[len(b.Lines)-1])), ",") {
+			continue
+		}
+		for j := 0; j < len(blocks); j++ {
+			c := blocks[j]
+			if j == i || c.Image || len(c.Lines) != 1 || c.Box.Y0 < b.Box.Y1-lh/2 || c.Box.Y0-b.Box.Y1 > lh || abs(c.Box.X0-b.Box.X0) > lh {
+				continue
+			}
+			b.Lines = append(b.Lines, c.Lines[0])
+			b.Box = b.Box.union(c.Box)
+			blocks = append(blocks[:j], blocks[j+1:]...)
+			if j < i {
+				i--
+			}
+			i-- // look again at the joined block
+			break
+		}
+	}
+	return blocks
+}
+
 // tableLike reports whether most lines of a block are rows of a table:
 // a label and, far to its right, a figure.
 func tableLike(b textBlock) bool {
@@ -707,7 +734,7 @@ func figureBands(blocks []textBlock, role []int, col rect, lh float64) []figureB
 	for i, b := range blocks {
 		// The number on a short line of its own, not a sentence of the
 		// text that names a figure ("Figur 24 viser ...").
-		if len(b.Lines) > 2 || !figureNumber(b) || len(b.Lines[0].Words) > 3 {
+		if len(b.Lines) > 4 || !figureNumber(b) || len(b.Lines[0].Words) > 3 {
 			continue
 		}
 		// The title: text right below the number.

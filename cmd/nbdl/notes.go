@@ -869,7 +869,11 @@ func linkAcross(chapters []epubChapter) {
 // remnantTail matches what OCR made of a note marker it did not read as a
 // number at the end of a word: "eksportsektor.”", "økonomi*”",
 // "inntekter.*%8", "sommeren.\"s". A trailing comma or colon is kept.
-var remnantTail = regexp.MustCompile(`^(.*[\p{L}\p{N}.;:)»?!])([”"*][”"*'’%?!:;+s]*\d*)([,;:]?)$`)
+var remnantTail = regexp.MustCompile(`^(.*[\p{L}\p{N}.;:)»?!])([”"*][”"*'’%?!:;+s$]*\d*)([,;:]?)$`)
+
+// afterStop matches what is left of a marker after a full stop that
+// ends a word: "land.?", "matematikk.$".
+var afterStop = regexp.MustCompile(`^(.*\p{L}\.)([?$'’][”"*'’%?!:;+s$]*\d*)()$`)
 
 // dropRemnants removes marker remnants from the ends of words in a book that
 // quotes with « », where a double quote or a star never ends a word. Words
@@ -903,6 +907,9 @@ func dropRemnants(pages []layoutPage) int {
 
 func withoutRemnant(word string) string {
 	m := remnantTail.FindStringSubmatch(word)
+	if m == nil {
+		m = afterStop.FindStringSubmatch(word)
+	}
 	if m == nil || strings.ContainsAny(m[1], `”"`) {
 		return word
 	}

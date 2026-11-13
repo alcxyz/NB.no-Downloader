@@ -522,3 +522,24 @@ func TestNoBreakAfterPhotoCaption(t *testing.T) {
 		t.Errorf("%d scene breaks, want 1 (between the two last paragraphs):\n%s", n, chs[0].Body)
 	}
 }
+
+func TestMergeContinuedNotPastPicture(t *testing.T) {
+	out := mergeContinued([]para{
+		{kind: "p", text: "Utgifter per år, milliarder kroner", page: 4},
+		{kind: "figure", image: "p0005-1.jpg", page: 4},
+		{kind: "p", text: "Figur 7 viser hvordan det gikk.", page: 5},
+	})
+	if len(out) != 3 {
+		t.Errorf("title joined to the text past its picture: %+v", out)
+	}
+}
+
+func TestMergeContinuedNotFigureNumber(t *testing.T) {
+	out := mergeContinued([]para{
+		{kind: "p", text: "Det går tilbake til år", page: 4},
+		{kind: "p", text: "FIGUR 15", page: 5},
+	})
+	if len(out) != 2 {
+		t.Errorf("figure number joined to the text: %+v", out)
+	}
+}

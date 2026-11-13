@@ -149,7 +149,7 @@ func textBlocks(pg *textPage, st bookStats) []textBlock {
 			out = append(out, splitLabels(part)...)
 		}
 	}
-	return assembleFigures(gapPictures(dropPageNumber(out, pg), pg), pg, st)
+	return assembleFigures(gapPictures(dropPageNumber(joinBrokenLines(out, st.bodyLH*pg.Height), pg), pg), pg, st)
 }
 
 func boxOf(lines []textLine) rect {
@@ -633,6 +633,15 @@ func endsLowerLetter(s string) bool {
 	return len(r) > 0 && unicode.IsLower(r[len(r)-1])
 }
 
+// wordsOf splits text into words for the tests that take a line.
+func wordsOf(s string) []textWord {
+	var ws []textWord
+	for _, f := range strings.Fields(s) {
+		ws = append(ws, textWord{Text: f})
+	}
+	return ws
+}
+
 // midSentence tells whether text stops where a sentence cannot end.
 func midSentence(s string) bool {
 	s = strings.TrimSpace(stripRefs(s))
@@ -999,7 +1008,10 @@ func mergeContinued(paras []para) []para {
 			// Over a page turn, a paragraph broken off after a lower-case
 			// word or a comma goes on even with a name or a number; so does
 			// a note, wherever OCR split it, and after a colon too.
-			turned := (p.page > prev.page || prev.kind == "endnote") && midSentence(prev.text) ||
+			// Not past a picture: what ends above one may be its title.
+			// Nor onto a figure's number ("FIGUR 15").
+			turned := j == n-1 && !figureNumber(textBlock{Lines: []textLine{{Words: wordsOf(p.text)}}}) &&
+				(p.page > prev.page || prev.kind == "endnote") && midSentence(prev.text) ||
 				prev.kind == "endnote" && startsLower(p.text) && strings.HasSuffix(strings.TrimSpace(stripRefs(prev.text)), ":")
 			if (prev.kind == "p" || prev.kind == "endnote") && (continues || turned) {
 				var b strings.Builder
