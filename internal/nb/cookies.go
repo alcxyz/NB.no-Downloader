@@ -1,4 +1,4 @@
-package main
+package nb
 
 import (
 	"errors"
@@ -20,11 +20,13 @@ func hostWithin(host, domain string) bool {
 	return host == domain || strings.HasSuffix(host, "."+domain)
 }
 
-func nbCookie(c *http.Cookie) bool {
+// OwnsCookie reports whether c belongs to nb.no.
+func OwnsCookie(c *http.Cookie) bool {
 	return hostWithin(strings.TrimPrefix(c.Domain, "."), "nb.no")
 }
 
-func hasLogin(cookies []*http.Cookie) bool {
+// HasLogin reports whether cookies hold an nb.no login.
+func HasLogin(cookies []*http.Cookie) bool {
 	for _, c := range cookies {
 		if c.Name == ssoCookieName && c.Value != "" {
 			return true
@@ -59,10 +61,10 @@ func newJar(cookies []*http.Cookie) (http.CookieJar, error) {
 	return jar, nil
 }
 
-// readCookies loads nb.no cookies from a file ("-" is stdin) holding either
+// ReadCookies loads nb.no cookies from a file ("-" is stdin) holding either
 // a browser Cookie header value ("a=1; b=2") or a Netscape cookies.txt
 // export.
-func readCookies(path string) ([]*http.Cookie, error) {
+func ReadCookies(path string) ([]*http.Cookie, error) {
 	var data []byte
 	var err error
 	if path == "-" {
@@ -101,7 +103,7 @@ func parseCookies(text string) []*http.Cookie {
 				domain = "." + domain
 			}
 			c := &http.Cookie{Name: f[5], Value: f[6], Domain: domain, Path: f[2]}
-			if nbCookie(c) {
+			if OwnsCookie(c) {
 				cookies = append(cookies, c)
 			}
 		}

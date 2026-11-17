@@ -1,4 +1,7 @@
-package main
+// Package nb talks to the Norwegian National Library (nb.no): it resolves
+// book identifiers, reads IIIF manifests and catalogue records, and fetches
+// page images and ALTO text.
+package nb
 
 import (
 	"bytes"
@@ -16,12 +19,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/parallel"
 )
 
 const (
 	manifestBase = "https://api.nb.no/catalog/v1/iiif/"
 	tokenURL     = "https://www.nb.no/nbssotoken"
-	userAgent    = "NB.no-Downloader (+https://github.com/alcxyz/NB.no-Downloader)"
+	altoBase     = "https://api.nb.no/catalog/v1/metadata/"
+	UserAgent    = "NB.no-Downloader (+https://github.com/alcxyz/NB.no-Downloader)"
 )
 
 var (
@@ -30,9 +36,9 @@ var (
 	itemsURLPath  = regexp.MustCompile(`/items/([0-9a-f]{32})`)
 )
 
-// errAuth marks a page that the server refused to serve, which usually means
+// ErrAuth marks a page that the server refused to serve, which usually means
 // missing or expired cookies.
-var errAuth = errors.New("access denied (401/403): check your login")
+var ErrAuth = errors.New("access denied (401/403): check your login")
 
 // Page is one canvas of a book, in reading order.
 type Page struct {
@@ -52,10 +58,10 @@ type Book struct {
 	Pages []Page
 }
 
-// resolveIdentifier turns user input into an identifier the IIIF API
+// ResolveIdentifier turns user input into an identifier the IIIF API
 // accepts: a full URN, a 32-character item id, or a bare id combined with
 // the document type.
-func resolveIdentifier(input, docType string) (string, error) {
+func ResolveIdentifier(input, docType string) (string, error) {
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return "", errors.New("empty book id")
@@ -78,9 +84,9 @@ func resolveIdentifier(input, docType string) (string, error) {
 	return "URN:NBN:no-nb_" + docType + "_" + input, nil
 }
 
-// outputStem picks the default output name for an identifier, keeping the
+// OutputStem picks the default output name for an identifier, keeping the
 // historical "<id>.pdf" name for bare ids.
-func outputStem(input, identifier string) string {
+func OutputStem(input, identifier string) string {
 	input = strings.TrimSpace(input)
 	if !strings.ContainsAny(input, "/:?#& ") {
 		return input
@@ -89,7 +95,9 @@ func outputStem(input, identifier string) string {
 	return strings.NewReplacer(":", "_", "/", "_").Replace(stem)
 }
 
-type downloader struct {
+// Downloader fetches books, page images, text and catalogue records from
+// nb.no.
+type Downloader struct {
 	client     *http.Client
 	authDomain string // the access token goes only to this domain
 	manifest   string // manifest URL; overridable in tests
@@ -109,12 +117,64 @@ type downloader struct {
 	retried atomic.Int64 // failed attempts that were retried
 }
 
-func (d *downloader) get(ctx context.Context, rawURL string) (*http.Response, error) {
+// New returns a downloader that sends the given nb.no cookies, and the
+// SSO access token when they include a login.
+func New(cookies []*http.Cookie) (*Downloader, error) {
+	jar, err := newJar(cookies)
+	if err != nil {
+		return nil, err
+	}
+	c := Config{
+		Client:     &http.Client{Jar: jar, Timeout: 2 * time.Minute},
+		AuthDomain: "nb.no",
+		Manifest:   manifestBase,
+		Retries:    15,
+		RetryDelay: 250 * time.Millisecond,
+	}
+	if HasLogin(cookies) {
+		c.TokenURL = tokenURL
+	}
+	return NewWithConfig(c), nil
+}
+
+// Config says where a Downloader finds nb.no's services and how it
+// retries; tests point it at a fake server.
+type Config struct {
+	Client     *http.Client
+	AuthDomain string // the access token goes only to this domain
+	Manifest   string // manifest URL
+	Catalog    string // catalogue record URL; empty for nb.no's
+	ALTO       string // ALTO text URL; empty for nb.no's
+	TokenURL   string // exchanges the SSO cookie for an access token; empty when not logged in
+	Retries    int
+	RetryDelay time.Duration
+}
+
+// NewWithConfig returns a downloader set up as c says.
+func NewWithConfig(c Config) *Downloader {
+	return &Downloader{
+		client:     c.Client,
+		authDomain: c.AuthDomain,
+		manifest:   c.Manifest,
+		catalog:    c.Catalog,
+		alto:       c.ALTO,
+		retries:    c.Retries,
+		retryDelay: c.RetryDelay,
+		tokenURL:   c.TokenURL,
+	}
+}
+
+// Retried returns how many failed requests were retried.
+func (d *Downloader) Retried() int64 {
+	return d.retried.Load()
+}
+
+func (d *Downloader) get(ctx context.Context, rawURL string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", UserAgent)
 	if d.tokenURL != "" && rawURL != d.tokenURL && hostWithin(req.URL.Hostname(), d.authDomain) {
 		token, err := d.accessToken(ctx)
 		if err != nil {
@@ -127,7 +187,7 @@ func (d *downloader) get(ctx context.Context, rawURL string) (*http.Response, er
 
 // accessToken returns a cached access token, renewing it shortly before it
 // expires.
-func (d *downloader) accessToken(ctx context.Context) (string, error) {
+func (d *Downloader) accessToken(ctx context.Context) (string, error) {
 	d.tokenMu.Lock()
 	defer d.tokenMu.Unlock()
 	if d.token != "" && time.Now().Before(d.tokenExp) {
@@ -156,17 +216,17 @@ func (d *downloader) accessToken(ctx context.Context) (string, error) {
 	return d.token, nil
 }
 
-// errNotFound marks a 404, which retrying will not fix.
-var errNotFound = errors.New("not found")
+// ErrNotFound marks a 404, which retrying will not fix.
+var ErrNotFound = errors.New("not found")
 
 // errUnauthorized is a 401: unlike nb.no's random 403s it is final.
-var errUnauthorized = fmt.Errorf("%w (401)", errAuth)
+var errUnauthorized = fmt.Errorf("%w (401)", ErrAuth)
 
 // fetch GETs rawURL and returns the body, retrying transient failures.
 // nb.no intermittently answers valid requests with 403, sometimes as an HTML
 // error page with status 200, so 403s and responses of the wrong content
-// type are retried too; a 403 that persists is reported as errAuth.
-func (d *downloader) fetch(ctx context.Context, rawURL, wantType string) ([]byte, error) {
+// type are retried too; a 403 that persists is reported as ErrAuth.
+func (d *Downloader) fetch(ctx context.Context, rawURL, wantType string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= d.retries; attempt++ {
 		if attempt > 0 {
@@ -181,7 +241,7 @@ func (d *downloader) fetch(ctx context.Context, rawURL, wantType string) ([]byte
 		if err == nil {
 			return body, nil
 		}
-		if errors.Is(err, errNotFound) || errors.Is(err, errUnauthorized) || ctx.Err() != nil {
+		if errors.Is(err, ErrNotFound) || errors.Is(err, errUnauthorized) || ctx.Err() != nil {
 			return nil, err
 		}
 		if attempt < d.retries {
@@ -189,13 +249,13 @@ func (d *downloader) fetch(ctx context.Context, rawURL, wantType string) ([]byte
 		}
 		lastErr = err
 	}
-	if errors.Is(lastErr, errAuth) {
+	if errors.Is(lastErr, ErrAuth) {
 		return nil, lastErr
 	}
 	return nil, fmt.Errorf("giving up after %d attempts: %w", d.retries+1, lastErr)
 }
 
-func (d *downloader) tryFetch(ctx context.Context, rawURL, wantType string) ([]byte, error) {
+func (d *Downloader) tryFetch(ctx context.Context, rawURL, wantType string) ([]byte, error) {
 	resp, err := d.get(ctx, rawURL)
 	if err != nil {
 		return nil, err
@@ -203,11 +263,11 @@ func (d *downloader) tryFetch(ctx context.Context, rawURL, wantType string) ([]b
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return nil, fmt.Errorf("%w: %s", errNotFound, rawURL)
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, rawURL)
 	case resp.StatusCode == http.StatusUnauthorized:
 		return nil, errUnauthorized
 	case resp.StatusCode == http.StatusForbidden:
-		return nil, errAuth
+		return nil, ErrAuth
 	case resp.StatusCode != http.StatusOK:
 		return nil, fmt.Errorf("HTTP %d for %s", resp.StatusCode, rawURL)
 	}
@@ -217,10 +277,10 @@ func (d *downloader) tryFetch(ctx context.Context, rawURL, wantType string) ([]b
 	return io.ReadAll(resp.Body)
 }
 
-// fetchBook downloads and parses the IIIF presentation manifest.
-func (d *downloader) fetchBook(ctx context.Context, identifier string) (*Book, error) {
+// FetchBook downloads and parses the IIIF presentation manifest.
+func (d *Downloader) FetchBook(ctx context.Context, identifier string) (*Book, error) {
 	body, err := d.fetch(ctx, d.manifest+url.PathEscape(identifier)+"/manifest", "application/json")
-	if errors.Is(err, errNotFound) {
+	if errors.Is(err, ErrNotFound) {
 		return nil, fmt.Errorf("no item found for %s", identifier)
 	}
 	if err != nil {
@@ -314,9 +374,9 @@ func labelString(raw json.RawMessage) string {
 	return ""
 }
 
-// imageURL builds the IIIF image request for a page at the requested width;
+// ImageURL builds the IIIF image request for a page at the requested width;
 // width <= 0 or wider than the original asks for full resolution.
-func imageURL(p Page, width int) string {
+func ImageURL(p Page, width int) string {
 	size := "full"
 	if width > 0 && (p.Width == 0 || width < p.Width) {
 		size = fmt.Sprintf("%d,", width)
@@ -324,90 +384,70 @@ func imageURL(p Page, width int) string {
 	return p.Service + "/full/" + size + "/0/default.jpg"
 }
 
-func pageFile(dir string, index int) string {
+// PageFile is where page index is kept in dir.
+func PageFile(dir string, index int) string {
 	return filepath.Join(dir, fmt.Sprintf("%04d.jpg", index+1))
 }
 
-// downloadPages fetches every page into dir with a pool of workers. Pages
+// DownloadPages fetches every page into dir with a pool of workers. Pages
 // already present in dir are kept, so an interrupted run resumes.
-func (d *downloader) downloadPages(ctx context.Context, book *Book, dir string, width, workers int, progress func(done, total int)) error {
+func (d *Downloader) DownloadPages(ctx context.Context, book *Book, dir string, width, workers int, progress func(done, total int)) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return parallel(ctx, len(book.Pages), workers, progress, func(ctx context.Context, i int) error {
-		path := pageFile(dir, i)
+	return parallel.Run(ctx, len(book.Pages), workers, progress, func(ctx context.Context, i int) error {
+		path := PageFile(dir, i)
 		if info, err := os.Stat(path); err == nil && info.Size() > 0 {
 			return nil
 		}
-		if err := d.downloadPage(ctx, imageURL(book.Pages[i], width), path); err != nil {
+		if err := d.DownloadPage(ctx, ImageURL(book.Pages[i], width), path); err != nil {
 			return fmt.Errorf("page %d (%s): %w", i+1, book.Pages[i].Label, err)
 		}
 		return nil
 	})
 }
 
-// parallel runs fn for 0..n-1 on a pool of workers and stops at the first
-// error.
-func parallel(ctx context.Context, n, workers int, progress func(done, total int), fn func(ctx context.Context, i int) error) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	jobs := make(chan int)
-	var (
-		mu       sync.Mutex
-		done     int
-		firstErr error
-		wg       sync.WaitGroup
-	)
-	finish := func(err error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
-				cancel()
-			}
-			return
-		}
-		done++
-		if progress != nil {
-			progress(done, n)
-		}
-	}
-
-	for w := 0; w < max(workers, 1); w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range jobs {
-				finish(fn(ctx, i))
-			}
-		}()
-	}
-
-feed:
-	for i := 0; i < n; i++ {
-		select {
-		case jobs <- i:
-		case <-ctx.Done():
-			break feed
-		}
-	}
-	close(jobs)
-	wg.Wait()
-
-	if firstErr != nil {
-		return firstErr
-	}
-	return ctx.Err()
-}
-
-// downloadPage fetches one image and writes it atomically to path.
-func (d *downloader) downloadPage(ctx context.Context, rawURL, path string) error {
+// DownloadPage fetches one image and writes it atomically to path.
+func (d *Downloader) DownloadPage(ctx context.Context, rawURL, path string) error {
 	data, err := d.fetch(ctx, rawURL, "image/jpeg")
 	if err != nil {
 		return err
 	}
+	tmp := path + ".part"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// CachedImage fetches an image once into path.
+func (d *Downloader) CachedImage(ctx context.Context, path, rawURL string) ([]byte, error) {
+	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+		return data, nil
+	}
+	data, err := d.fetch(ctx, rawURL, "image/jpeg")
+	if err != nil {
+		return nil, err
+	}
+	return data, writeFileAtomic(path, data)
+}
+
+// FetchALTO fetches nb.no's ALTO text of one page. nb.no answers 401 for
+// books whose text it does not publish.
+func (d *Downloader) FetchALTO(ctx context.Context, urn, pageID string) ([]byte, error) {
+	return d.fetch(ctx, d.altoURL(urn, pageID), "application/xml")
+}
+
+func (d *Downloader) altoURL(urn, pageID string) string {
+	base := d.alto
+	if base == "" {
+		base = altoBase
+	}
+	return base + url.PathEscape(urn) + "/altos/" + url.PathEscape(pageID)
+}
+
+func writeFileAtomic(path string, data []byte) error {
 	tmp := path + ".part"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		os.Remove(tmp)

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/proto"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/browser"
 )
 
 func TestBookFileName(t *testing.T) {
@@ -33,11 +35,11 @@ func TestBrowseEndToEnd(t *testing.T) {
 	t.Setenv("NBDL_PROFILE", t.TempDir())
 	dir := t.TempDir()
 
-	b, l, err := launchBrowser(true)
+	b, l, err := browser.Launch(true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer waitExit(l)
+	defer browser.WaitExit(l)
 	defer b.Close()
 	first, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
 	if err != nil {

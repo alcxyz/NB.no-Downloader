@@ -1,4 +1,4 @@
-package main
+package layout
 
 import (
 	"bytes"
@@ -13,6 +13,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/ocr"
 )
 
 // A drop cap is the large initial that opens a chapter, set beside the
@@ -28,16 +30,16 @@ import (
 // lostCap is a drop cap OCR did not read.
 type lostCap struct {
 	page, block int
-	cap         rect // where the letter is printed
-	merged      bool // read with the first word, as one tall word
+	cap         ocr.Rect // where the letter is printed
+	merged      bool     // read with the first word, as one tall word
 }
 
 // findLostCaps finds paragraphs that start with a small letter beside an
 // empty space as tall as two to four of their lines.
-func findLostCaps(pages []layoutPage) []lostCap {
+func findLostCaps(pages []Page) []lostCap {
 	var out []lostCap
 	for i, lp := range pages {
-		if lp.Text == nil || lp.Kind != pageNormal {
+		if lp.Text == nil || lp.Kind != Normal {
 			continue
 		}
 		for bi, b := range lp.Text.Blocks {
@@ -51,13 +53,13 @@ func findLostCaps(pages []layoutPage) []lostCap {
 	return out
 }
 
-func lostCapIn(b textBlock, blocks []textBlock, bi int) (rect, bool) {
+func lostCapIn(b ocr.Block, blocks []ocr.Block, bi int) (ocr.Rect, bool) {
 	if b.Margin || b.Image || len(b.Lines) < 3 || len(b.Lines[0].Words) == 0 {
-		return rect{}, false
+		return ocr.Rect{}, false
 	}
 	first, _ := utf8.DecodeRuneInString(b.Lines[0].Words[0].Text)
 	if !unicode.IsLower(first) {
-		return rect{}, false
+		return ocr.Rect{}, false
 	}
 	h := lineHeight(b.Lines[0])
 	x0 := b.Lines[0].Box.X0
@@ -66,19 +68,19 @@ func lostCapIn(b textBlock, blocks []textBlock, bi int) (rect, bool) {
 		k++
 	}
 	if k < 2 || k > 4 || k == len(b.Lines) {
-		return rect{}, false
+		return ocr.Rect{}, false
 	}
 	left := b.Lines[k].Box.X0
 	for _, l := range b.Lines[k:] {
 		left = min(left, l.Box.X0)
 	}
 	if x0-left < h/2 || x0-left > 6*h {
-		return rect{}, false
+		return ocr.Rect{}, false
 	}
-	c := rect{left, b.Lines[0].Box.Y0 - h/2, x0 - h/4, b.Lines[k-1].Box.Y1}
+	c := ocr.Rect{X0: left, Y0: b.Lines[0].Box.Y0 - h/2, X1: x0 - h/4, Y1: b.Lines[k-1].Box.Y1}
 	for oi, o := range blocks {
 		if oi != bi && !o.Margin && o.Box.X0 < c.X1 && o.Box.X1 > c.X0 && o.Box.Y0 < c.Y1 && o.Box.Y1 > c.Y0 {
-			return rect{}, false
+			return ocr.Rect{}, false
 		}
 	}
 	return c, true
@@ -86,9 +88,9 @@ func lostCapIn(b textBlock, blocks []textBlock, bi int) (rect, bool) {
 
 // mergedCapIn finds a first word far taller than the rest of its line and
 // read with doubt: a drop cap and the word after it, read as one.
-func mergedCapIn(b textBlock) (rect, bool) {
+func mergedCapIn(b ocr.Block) (ocr.Rect, bool) {
 	if b.Margin || b.Image || len(b.Lines) < 2 || len(b.Lines[0].Words) < 3 {
-		return rect{}, false
+		return ocr.Rect{}, false
 	}
 	ws := b.Lines[0].Words
 	var rest []float64
@@ -97,26 +99,26 @@ func mergedCapIn(b textBlock) (rect, bool) {
 	}
 	// A cap I read with a year ("12001") is mended by fixDropCap.
 	if ws[0].Conf >= doubtConf || ws[0].Box.H() < 1.8*median(rest) || strings.ContainsAny(ws[0].Text, "0123456789") {
-		return rect{}, false
+		return ocr.Rect{}, false
 	}
 	return ws[0].Box, true
 }
 
 // textBand is the height of a line's text, without a tall first word.
-func textBand(l textLine) rect {
+func textBand(l ocr.Line) ocr.Rect {
 	var y0, y1 []float64
 	for _, w := range l.Words[1:] {
 		y0 = append(y0, w.Box.Y0)
 		y1 = append(y1, w.Box.Y1)
 	}
-	return rect{l.Box.X0, median(y0), l.Box.X1, median(y1)}
+	return ocr.Rect{X0: l.Box.X0, Y0: median(y0), X1: l.Box.X1, Y1: median(y1)}
 }
 
-// restoreCaps reads the lost drop caps again from the page images and puts
+// RestoreCaps reads the lost drop caps again from the page images and puts
 // the letters back, as a word of their own or as the start of the first
 // word, whichever the book's vocabulary knows. It returns how many it put
 // back; a cap it cannot read is left as it was.
-func restoreCaps(ctx context.Context, d *downloader, book *Book, pages []layoutPage, dir string, engines *lazyEngine) int {
+func RestoreCaps(ctx context.Context, images PageImages, pages []Page, dir string, engines Engines) int {
 	caps := findLostCaps(pages)
 	if len(caps) == 0 {
 		return 0
@@ -131,10 +133,9 @@ func restoreCaps(ctx context.Context, d *downloader, book *Book, pages []layoutP
 		if c.merged {
 			lineBox = textBand(line)
 		}
-		region := c.cap.union(lineBox)
+		region := c.cap.Union(lineBox)
 		key := sha256.Sum256([]byte(fmt.Sprintf("%d %v", c.page, region)))
-		data, err := d.cachedImage(ctx, filepath.Join(dir, fmt.Sprintf("cap-%x.jpg", key[:8])),
-			figureURL(book.Pages[c.page], pg, region, 0))
+		data, err := images.Crop(ctx, c.page, pg, region, filepath.Join(dir, fmt.Sprintf("cap-%x.jpg", key[:8])))
 		if err != nil {
 			if ctx.Err() != nil {
 				return restored
@@ -165,16 +166,16 @@ func restoreCaps(ctx context.Context, d *downloader, book *Book, pages []layoutP
 		if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 			continue
 		}
-		engine, err := engines.get(ctx)
+		engine, err := engines.Engine(ctx)
 		if err != nil {
 			return restored
 		}
-		tsv, err := engine.recognize(ctx, path)
+		tsv, err := engine.Recognize(ctx, path)
 		os.Remove(path)
 		if err != nil {
 			continue
 		}
-		read, err := parseTSV(tsv)
+		read, err := ocr.ParseTSV(tsv)
 		if err != nil {
 			continue
 		}
@@ -241,7 +242,7 @@ func onlyLetters(s string) bool {
 // to it when that makes a word the book uses ("D" and "ette"), on its own
 // when it is a word and the first word is one too ("I" and "denne").
 // Otherwise the letter was likely misread, and nothing changes.
-func putCap(line *textLine, letter string, at rect, known func(string) bool) bool {
+func putCap(line *ocr.Line, letter string, at ocr.Rect, known func(string) bool) bool {
 	w := &line.Words[0]
 	pre, core, post := splitWordParts(w.Text)
 	switch {
@@ -250,9 +251,9 @@ func putCap(line *textLine, letter string, at rect, known func(string) bool) boo
 	case known(letter) && known(core):
 		// The size of the text, so it is not taken for a drop cap again.
 		h := lineHeight(*line)
-		box := rect{at.X0, w.Box.Y1 - h, at.X1, w.Box.Y1}
-		line.Words = append([]textWord{{Text: letter, Box: box, Conf: 1}}, line.Words...)
-		line.Box = line.Box.union(box)
+		box := ocr.Rect{X0: at.X0, Y0: w.Box.Y1 - h, X1: at.X1, Y1: w.Box.Y1}
+		line.Words = append([]ocr.Word{{Text: letter, Box: box, Conf: 1}}, line.Words...)
+		line.Box = line.Box.Union(box)
 	default:
 		return false
 	}
@@ -301,23 +302,23 @@ func mergedWords(read []string, second string, known func(string) bool) []string
 
 // replaceFirstWord puts the words read in place of the tall first word,
 // at the size of the text.
-func replaceFirstWord(line *textLine, words []string, capBox, band rect) {
-	var ws []textWord
+func replaceFirstWord(line *ocr.Line, words []string, capBox, band ocr.Rect) {
+	var ws []ocr.Word
 	if len(words) == 2 {
-		ws = append(ws, textWord{Text: words[0], Conf: 1, Box: rect{capBox.X0, band.Y0, capBox.X1, band.Y1}})
+		ws = append(ws, ocr.Word{Text: words[0], Conf: 1, Box: ocr.Rect{X0: capBox.X0, Y0: band.Y0, X1: capBox.X1, Y1: band.Y1}})
 		words = words[1:]
 	}
 	x0 := capBox.X0
 	if len(ws) > 0 {
 		x0 = band.X0
 	}
-	ws = append(ws, textWord{Text: words[0], Conf: 1, Box: rect{x0, band.Y0, line.Words[0].Box.X1, band.Y1}})
+	ws = append(ws, ocr.Word{Text: words[0], Conf: 1, Box: ocr.Rect{X0: x0, Y0: band.Y0, X1: line.Words[0].Box.X1, Y1: band.Y1}})
 	line.Words = append(ws, line.Words[1:]...)
 }
 
 // capRightEdge finds where a drop cap read with the first word ends: the
 // cap reaches down past the first line, the letters after it do not.
-func capRightEdge(img *image.Gray, region, word, band rect) (float64, bool) {
+func capRightEdge(img *image.Gray, region, word, band ocr.Rect) (float64, bool) {
 	scale := float64(img.Bounds().Dx()) / region.W()
 	y0 := int((band.Y1 + 0.4*band.H() - region.Y0) * scale)
 	y1 := min(img.Bounds().Dy(), int((word.Y1-region.Y0)*scale))
@@ -356,10 +357,10 @@ func capRightEdge(img *image.Gray, region, word, band rect) (float64, bool) {
 
 // bookVocabulary counts the words of the book read with confidence, by
 // their lower-case form.
-func bookVocabulary(pages []layoutPage) map[string]int {
+func bookVocabulary(pages []Page) map[string]int {
 	vocab := map[string]int{}
 	for _, lp := range pages {
-		eachWord(lp, func(w *textWord) {
+		eachWord(lp, func(w *ocr.Word) {
 			if w.Conf >= sureConf {
 				if _, core, _ := splitWordParts(w.Text); core != "" {
 					vocab[strings.ToLower(core)]++
@@ -384,7 +385,7 @@ func toGray(img image.Image) *image.Gray {
 // capLine builds an image of the first line with the drop cap scaled down
 // in front of it, as if it were set at the size of the text. region is the
 // part of the page img shows, in the page's text units.
-func capLine(img *image.Gray, region, capBox, lineBox rect) *image.Gray {
+func capLine(img *image.Gray, region, capBox, lineBox ocr.Rect) *image.Gray {
 	scale := float64(img.Bounds().Dx()) / region.W()
 	px := func(v, origin float64) int { return int((v - origin) * scale) }
 	capArea := image.Rect(0, 0, px(capBox.X1, region.X0), img.Bounds().Dy())

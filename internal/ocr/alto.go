@@ -1,25 +1,26 @@
-package main
+package ocr
 
 import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 )
 
-// parseALTO reads nb.no's ALTO OCR files into the shared page model. It
+// ParseALTO reads nb.no's ALTO OCR files into the shared page model. It
 // walks the XML as a token stream because ALTO nests blocks in different
 // ways (margins, print space, composed blocks) and only a few elements and
 // attributes matter.
-func parseALTO(r io.Reader) (*textPage, error) {
+func ParseALTO(r io.Reader) (*Page, error) {
 	dec := xml.NewDecoder(r)
-	page := &textPage{}
+	page := &Page{}
 	var (
 		inMargin int // depth inside TopMargin/BottomMargin/LeftMargin/RightMargin
-		block    *textBlock
-		line     *textLine
-		extent   rect // the margins and print space together cover the page
+		block    *Block
+		line     *Line
+		extent   Rect // the margins and print space together cover the page
 	)
 	for {
 		tok, err := dec.Token()
@@ -37,32 +38,32 @@ func parseALTO(r io.Reader) (*textPage, error) {
 				page.Width, page.Height = num(a["WIDTH"]), num(a["HEIGHT"])
 			case "TopMargin", "BottomMargin", "LeftMargin", "RightMargin":
 				inMargin++
-				extent = extent.union(altoBox(a))
+				extent = extent.Union(altoBox(a))
 			case "PrintSpace":
-				extent = extent.union(altoBox(a))
+				extent = extent.Union(altoBox(a))
 			case "TextBlock":
-				page.Blocks = append(page.Blocks, textBlock{Box: altoBox(a), Margin: inMargin > 0})
+				page.Blocks = append(page.Blocks, Block{Box: altoBox(a), Margin: inMargin > 0})
 				block = &page.Blocks[len(page.Blocks)-1]
 			case "Illustration", "GraphicalElement":
 				if inMargin == 0 {
-					page.Blocks = append(page.Blocks, textBlock{Box: altoBox(a), Image: true})
+					page.Blocks = append(page.Blocks, Block{Box: altoBox(a), Image: true})
 					block, line = nil, nil
 				}
 			case "ComposedBlock":
 				if t := strings.ToLower(a["TYPE"]); inMargin == 0 && (t == "illustration" || t == "picture" || t == "image") {
-					page.Blocks = append(page.Blocks, textBlock{Box: altoBox(a), Image: true})
+					page.Blocks = append(page.Blocks, Block{Box: altoBox(a), Image: true})
 				}
 			case "TextLine":
 				if block == nil {
 					continue
 				}
-				block.Lines = append(block.Lines, textLine{Box: altoBox(a)})
+				block.Lines = append(block.Lines, Line{Box: altoBox(a)})
 				line = &block.Lines[len(block.Lines)-1]
 			case "String":
 				if line == nil {
 					continue
 				}
-				w := textWord{Text: a["CONTENT"], Box: altoBox(a), Conf: 1}
+				w := Word{Text: a["CONTENT"], Box: altoBox(a), Conf: 1}
 				if wc, err := strconv.ParseFloat(a["WC"], 64); err == nil {
 					w.Conf = wc
 				}
@@ -94,23 +95,23 @@ func parseALTO(r io.Reader) (*textPage, error) {
 // normaliseALTO puts every box in the units of the words. Some of nb.no's
 // files give blocks, margins and the print space in a larger unit than
 // lines and words, while the Page size matches the words.
-func normaliseALTO(page *textPage, extent rect) {
+func normaliseALTO(page *Page, extent Rect) {
 	var ratios []float64
-	var words rect
+	var words Rect
 	for i := range page.Blocks {
 		b := &page.Blocks[i]
 		if b.Image || len(b.Lines) == 0 {
 			continue
 		}
-		var lines rect
+		var lines Rect
 		for _, l := range b.Lines {
-			lines = lines.union(l.Box)
+			lines = lines.Union(l.Box)
 		}
 		if lines.W() > 0 && b.Box.W() > 0 {
 			ratios = append(ratios, b.Box.W()/lines.W())
 		}
 		b.Box = lines
-		words = words.union(lines)
+		words = words.Union(lines)
 	}
 	scale := median(ratios)
 	if scale < 1.1 {
@@ -119,7 +120,7 @@ func normaliseALTO(page *textPage, extent rect) {
 	for i := range page.Blocks {
 		b := &page.Blocks[i]
 		if b.Image {
-			b.Box = rect{b.Box.X0 / scale, b.Box.Y0 / scale, b.Box.X1 / scale, b.Box.Y1 / scale}
+			b.Box = Rect{b.Box.X0 / scale, b.Box.Y0 / scale, b.Box.X1 / scale, b.Box.Y1 / scale}
 		}
 	}
 	if page.Width < words.X1 || page.Height < words.Y1 {
@@ -141,7 +142,16 @@ func num(s string) float64 {
 	return f
 }
 
-func altoBox(a map[string]string) rect {
+func altoBox(a map[string]string) Rect {
 	x, y := num(a["HPOS"]), num(a["VPOS"])
-	return rect{x, y, x + num(a["WIDTH"]), y + num(a["HEIGHT"])}
+	return Rect{x, y, x + num(a["WIDTH"]), y + num(a["HEIGHT"])}
+}
+
+func median(vals []float64) float64 {
+	if len(vals) == 0 {
+		return 0
+	}
+	s := append([]float64(nil), vals...)
+	sort.Float64s(s)
+	return s[len(s)/2]
 }

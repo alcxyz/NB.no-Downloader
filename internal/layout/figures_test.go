@@ -1,28 +1,30 @@
-package main
+package layout
 
 import (
 	"strings"
 	"testing"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/ocr"
 )
 
 // wordsLine lays out a line's words evenly between x0 and x1, each with
 // its own box, as OCR reports them.
-func wordsLine(text string, x0, y, x1 float64) textLine {
+func wordsLine(text string, x0, y, x1 float64) ocr.Line {
 	ws := strings.Fields(text)
-	l := textLine{Box: rect{x0, y, x1, y + 25}}
+	l := ocr.Line{Box: ocr.Rect{X0: x0, Y0: y, X1: x1, Y1: y + 25}}
 	slot := (x1 - x0) / float64(len(ws))
 	for i, w := range ws {
-		l.Words = append(l.Words, textWord{Text: w, Conf: 0.95,
-			Box: rect{x0 + float64(i)*slot, y, x0 + float64(i+1)*slot - 10, y + 25}})
+		l.Words = append(l.Words, ocr.Word{Text: w, Conf: 0.95,
+			Box: ocr.Rect{X0: x0 + float64(i)*slot, Y0: y, X1: x0 + float64(i+1)*slot - 10, Y1: y + 25}})
 	}
 	return l
 }
 
-func blockOf(lines ...textLine) textBlock {
-	return textBlock{Lines: lines, Box: boxOf(lines)}
+func blockOf(lines ...ocr.Line) ocr.Block {
+	return ocr.Block{Lines: lines, Box: boxOf(lines)}
 }
 
-func blockTexts(blocks []textBlock) []string {
+func blockTexts(blocks []ocr.Block) []string {
 	var out []string
 	for _, b := range blocks {
 		if b.Image {
@@ -38,17 +40,17 @@ func blockTexts(blocks []textBlock) []string {
 // blocks of their own, and an axis value set on the last line of the title.
 func TestTextBlocksAssembleChart(t *testing.T) {
 	long := "Dette er en lang linje med mange ord i seg som fortsetter"
-	body := func(y float64) textBlock {
+	body := func(y float64) ocr.Block {
 		return blockOf(wordsLine(long, 350, y, 1960), wordsLine(long, 350, y+78, 1960), wordsLine(long, 350, y+156, 1960))
 	}
 	title2 := wordsLine("1890-2020, prosent", 570, 700, 980)
 	value := wordsLine("20%", 484, 750, 544) // far left of the title's text
-	pg := &textPage{Width: 2409, Height: 3559, Blocks: []textBlock{
+	pg := &ocr.Page{Width: 2409, Height: 3559, Blocks: []ocr.Block{
 		body(450),
 		blockOf(wordsLine("FIGUR 5", 444, 640, 612)),
 		blockOf(wordsLine("Nettoeksport som andel av BNP, gjennomsnitt per tiår,", 573, 650, 1666), title2, value),
 		blockOf(wordsLine("15%", 491, 950, 544)),
-		{Lines: []textLine{{Box: rect{560, 900, 1900, 1600}}}, Box: rect{560, 900, 1900, 1600}},
+		{Lines: []ocr.Line{{Box: ocr.Rect{X0: 560, Y0: 900, X1: 1900, Y1: 1600}}}, Box: ocr.Rect{X0: 560, Y0: 900, X1: 1900, Y1: 1600}},
 		blockOf(wordsLine("10%", 490, 1150, 544)),
 		blockOf(wordsLine("1890 1900 1910 1920 1930 1940", 560, 1650, 1900)),
 		blockOf(wordsLine("—— Norge - ------- Norge fastland", 900, 1760, 1500)),
@@ -80,11 +82,11 @@ func TestTextBlocksAssembleChart(t *testing.T) {
 }
 
 // tableRow lays out a table row: a label at the left, figures far right.
-func tableRow(y float64, label string, figures ...string) textLine {
-	l := textLine{Words: []textWord{{Text: label, Conf: 0.95, Box: rect{362, y, 640, y + 25}}}}
+func tableRow(y float64, label string, figures ...string) ocr.Line {
+	l := ocr.Line{Words: []ocr.Word{{Text: label, Conf: 0.95, Box: ocr.Rect{X0: 362, Y0: y, X1: 640, Y1: y + 25}}}}
 	for i, f := range figures {
 		x := 1300 + 300*float64(i)
-		l.Words = append(l.Words, textWord{Text: f, Conf: 0.95, Box: rect{x, y, x + 80, y + 25}})
+		l.Words = append(l.Words, ocr.Word{Text: f, Conf: 0.95, Box: ocr.Rect{X0: x, Y0: y, X1: x + 80, Y1: y + 25}})
 	}
 	l.Box = wordsBox(l.Words)
 	return l
@@ -94,10 +96,10 @@ func tableRow(y float64, label string, figures ...string) textLine {
 // of the text that names a figure frames none.
 func TestTextBlocksTable(t *testing.T) {
 	long := "Dette er en lang linje med mange ord i seg som fortsetter"
-	body := func(y float64) textBlock {
+	body := func(y float64) ocr.Block {
 		return blockOf(wordsLine(long, 362, y, 2094), wordsLine(long, 362, y+66, 2094), wordsLine(long, 362, y+132, 2094))
 	}
-	pg := &textPage{Width: 2409, Height: 3559, Blocks: []textBlock{
+	pg := &ocr.Page{Width: 2409, Height: 3559, Blocks: []ocr.Block{
 		body(400),
 		blockOf(wordsLine("TABELL 3", 362, 700, 585)),
 		blockOf(wordsLine("Skatteinntekter ved eksisterende og alternativ modell", 364, 760, 1987)),
@@ -141,7 +143,7 @@ func TestTextBlocksNoteNumbers(t *testing.T) {
 			ref.Lines[li].Words[wi].Conf = 0.6
 		}
 	}
-	pg := &textPage{Width: 2409, Height: 3559, Blocks: []textBlock{
+	pg := &ocr.Page{Width: 2409, Height: 3559, Blocks: []ocr.Block{
 		blockOf(wordsLine("51", 365, 900, 410)),
 		blockOf(wordsLine("52", 365, 1200, 410)),
 		blockOf(wordsLine("53", 365, 1500, 410)),
@@ -162,11 +164,11 @@ func TestTextBlocksNoteNumbers(t *testing.T) {
 func TestTextBlocksLegendInFrame(t *testing.T) {
 	long := "Dette er en lang linje med mange ord i seg som fortsetter"
 	body := blockOf(wordsLine(long, 350, 2000, 1960), wordsLine(long, 350, 2078, 1960), wordsLine(long, 350, 2156, 1960))
-	pg := &textPage{Width: 2409, Height: 3559, Blocks: []textBlock{
+	pg := &ocr.Page{Width: 2409, Height: 3559, Blocks: []ocr.Block{
 		blockOf(wordsLine("FIGUR 1", 366, 408, 547)),
 		blockOf(wordsLine("Budsjettlekkasjen i offentlige utgifter,", 366, 513, 1200),
 			wordsLine("rebasert: oktoberbudsjett = O, milliarder kroner", 366, 586, 1400)),
-		{Lines: []textLine{{Box: rect{420, 700, 2030, 1700}}}, Box: rect{420, 700, 2030, 1700}},
+		{Lines: []ocr.Line{{Box: ocr.Rect{X0: 420, Y0: 700, X1: 2030, Y1: 1700}}}, Box: ocr.Rect{X0: 420, Y0: 700, X1: 2030, Y1: 1700}},
 		blockOf(wordsLine("Statsbudsjett [saldert, des.) M Statsregnskap", 1320, 1750, 2050)),
 		blockOf(wordsLine("Kilde: Statsbudsjetter, SSB", 1500, 1850, 2090)),
 		body,
@@ -189,11 +191,11 @@ func TestTextBlocksLegendInFrame(t *testing.T) {
 // its labels in it; a section break's space holds its number, which stays.
 func TestTextBlocksGapPicture(t *testing.T) {
 	long := "Dette er en lang linje med mange ord i seg som fortsetter"
-	body := func(y float64) textBlock {
+	body := func(y float64) ocr.Block {
 		return blockOf(wordsLine(long, 350, y, 1960), wordsLine(long, 350, y+78, 1960), wordsLine(long, 350, y+156, 1960))
 	}
 	st := bookStats{bodyLH: 0.0126}
-	pg := &textPage{Width: 2409, Height: 3559, Blocks: []textBlock{
+	pg := &ocr.Page{Width: 2409, Height: 3559, Blocks: []ocr.Block{
 		body(400),
 		blockOf(wordsLine("EBA", 400, 900, 492)),
 		blockOf(wordsLine("LBA", 400, 1400, 486)),
@@ -207,7 +209,7 @@ func TestTextBlocksGapPicture(t *testing.T) {
 		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 
-	pg.Blocks = []textBlock{body(400), blockOf(wordsLine("III.", 1100, 800, 1160)), body(1050)}
+	pg.Blocks = []ocr.Block{body(400), blockOf(wordsLine("III.", 1100, 800, 1160)), body(1050)}
 	got = blockTexts(textBlocks(pg, st))
 	want = []string{textOf(body(400)), "III.", textOf(body(1050))}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -228,7 +230,7 @@ func TestLegendLikeBoxes(t *testing.T) {
 }
 
 func TestJoinBrokenLines(t *testing.T) {
-	blocks := joinBrokenLines([]textBlock{
+	blocks := joinBrokenLines([]ocr.Block{
 		blockOf(wordsLine("FIGUR 14", 319, 408, 532)),
 		blockOf(wordsLine("Rollen til offentlige utgifter i Norge, år 1995-2024,", 321, 489, 1386)),
 		blockOf(wordsLine("milliarder kroner", 321, 535, 667)),

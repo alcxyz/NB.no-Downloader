@@ -1,4 +1,6 @@
-package main
+// Package browser runs the dedicated Chromium profile that holds the nb.no
+// login.
+package browser
 
 import (
 	"errors"
@@ -13,6 +15,8 @@ import (
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/launcher/flags"
 	"github.com/go-rod/rod/lib/proto"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/nb"
 )
 
 const (
@@ -31,10 +35,10 @@ func profileDir() (string, error) {
 	return filepath.Join(base, "nb-downloader", "browser-profile"), nil
 }
 
-// browserPath finds a Chromium-based browser: $NBDL_BROWSER, then an
+// Path finds a Chromium-based browser: $NBDL_BROWSER, then an
 // installed Chrome, Chromium or Edge, and finally a Chromium build that
 // go-rod downloads into its cache.
-func browserPath() (string, error) {
+func Path() (string, error) {
 	if path := os.Getenv("NBDL_BROWSER"); path != "" {
 		return path, nil
 	}
@@ -49,9 +53,9 @@ func browserPath() (string, error) {
 	return path, nil
 }
 
-// launchBrowser starts the browser on the dedicated profile.
-func launchBrowser(headless bool) (*rod.Browser, *launcher.Launcher, error) {
-	bin, err := browserPath()
+// Launch starts the browser on the dedicated profile.
+func Launch(headless bool) (*rod.Browser, *launcher.Launcher, error) {
+	bin, err := Path()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -91,17 +95,17 @@ func launchBrowser(headless bool) (*rod.Browser, *launcher.Launcher, error) {
 	return b, l, nil
 }
 
-// waitExit waits for the browser process to exit, so it has written the
+// WaitExit waits for the browser process to exit, so it has written the
 // profile and released its lock. launcher.Cleanup also deletes the user data
 // directory, which holds the login; clearing the flag first (it is only read
 // at launch) makes Cleanup only wait.
-func waitExit(l *launcher.Launcher) {
+func WaitExit(l *launcher.Launcher) {
 	l.Delete(flags.UserDataDir)
 	l.Cleanup()
 }
 
-// nbCookies returns the browser's nb.no cookies.
-func nbCookies(b *rod.Browser) ([]*http.Cookie, error) {
+// Cookies returns the browser's nb.no cookies.
+func Cookies(b *rod.Browser) ([]*http.Cookie, error) {
 	all, err := b.GetCookies()
 	if err != nil {
 		return nil, err
@@ -109,16 +113,16 @@ func nbCookies(b *rod.Browser) ([]*http.Cookie, error) {
 	var cookies []*http.Cookie
 	for _, c := range all {
 		hc := &http.Cookie{Name: c.Name, Value: c.Value, Domain: c.Domain, Path: c.Path}
-		if nbCookie(hc) {
+		if nb.OwnsCookie(hc) {
 			cookies = append(cookies, hc)
 		}
 	}
 	return cookies, nil
 }
 
-// browserSession reads the saved nb.no cookies from the dedicated profile
+// Session reads the saved nb.no cookies from the dedicated profile
 // without showing a window. It returns none when no profile exists yet.
-func browserSession() ([]*http.Cookie, error) {
+func Session() ([]*http.Cookie, error) {
 	dir, err := profileDir()
 	if err != nil {
 		return nil, err
@@ -126,16 +130,16 @@ func browserSession() ([]*http.Cookie, error) {
 	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
-	b, l, err := launchBrowser(true)
+	b, l, err := Launch(true)
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		b.Close()
-		waitExit(l)
+		WaitExit(l)
 	}()
-	cookies, err := nbCookies(b)
-	if err != nil || hasLogin(cookies) {
+	cookies, err := Cookies(b)
+	if err != nil || nb.HasLogin(cookies) {
 		return cookies, err
 	}
 	// The nbsso cookie may not outlive the browser; visiting the login page
@@ -145,25 +149,25 @@ func browserSession() ([]*http.Cookie, error) {
 		return cookies, nil
 	}
 	defer page.Close()
-	for i := 0; i < 10 && !hasLogin(cookies); i++ {
+	for i := 0; i < 10 && !nb.HasLogin(cookies); i++ {
 		time.Sleep(time.Second)
-		if cookies, err = nbCookies(b); err != nil {
+		if cookies, err = Cookies(b); err != nil {
 			return nil, err
 		}
 	}
 	return cookies, nil
 }
 
-// login opens a browser window on the nb.no login page and waits until the
+// Login opens a browser window on the nb.no login page and waits until the
 // SSO cookie appears or the user closes the window.
-func login() error {
-	b, l, err := launchBrowser(false)
+func Login() error {
+	b, l, err := Launch(false)
 	if err != nil {
 		return err
 	}
-	defer waitExit(l)
+	defer WaitExit(l)
 
-	if cookies, err := nbCookies(b); err == nil && hasLogin(cookies) {
+	if cookies, err := Cookies(b); err == nil && nb.HasLogin(cookies) {
 		fmt.Fprintln(os.Stderr, "already logged in; opening nb.no so you can check or log out")
 	}
 	if _, err := b.Page(proto.TargetCreateTarget{URL: loginURL}); err != nil {
@@ -175,12 +179,12 @@ func login() error {
 
 	for {
 		time.Sleep(time.Second)
-		cookies, err := nbCookies(b)
+		cookies, err := Cookies(b)
 		if err != nil {
 			// The user closed the window.
 			return errors.New("browser closed before login finished")
 		}
-		if hasLogin(cookies) {
+		if nb.HasLogin(cookies) {
 			fmt.Fprintln(os.Stderr, "logged in; the session is saved for later downloads")
 			time.Sleep(2 * time.Second) // let the browser persist the cookies
 			return b.Close()
@@ -188,8 +192,8 @@ func login() error {
 	}
 }
 
-// logout deletes the dedicated browser profile.
-func logout() error {
+// Logout deletes the dedicated browser profile.
+func Logout() error {
 	dir, err := profileDir()
 	if err != nil {
 		return err

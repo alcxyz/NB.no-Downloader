@@ -1,4 +1,5 @@
-package main
+// Package pdf writes page images as a PDF.
+package pdf
 
 import (
 	"bufio"
@@ -17,8 +18,8 @@ import (
 // scale for a page.
 const a4WidthPt = 595.28
 
-// pdfPage is one JPEG to place on its own page, filling it.
-type pdfPage struct {
+// Page is one JPEG to place on its own page, filling it.
+type Page struct {
 	Path           string
 	InchesPerPixel float64 // physical scale of the original scan, or 0
 	OriginalWidth  int     // original scan width in pixels, for the scale
@@ -51,10 +52,10 @@ func (p *pdfWriter) object(id int) {
 	p.printf("%d 0 obj\n", id)
 }
 
-// writePDF embeds each JPEG unchanged (DCTDecode), so pages keep the
+// Write embeds each JPEG unchanged (DCTDecode), so pages keep the
 // quality the server delivered and no image is decoded or re-encoded.
 // Images are read one at a time to keep memory bounded.
-func writePDF(out io.Writer, title string, pages []pdfPage) error {
+func Write(out io.Writer, title string, pages []Page) error {
 	p := &pdfWriter{w: bufio.NewWriter(out)}
 	p.printf("%%PDF-1.4\n%%\xe2\xe3\xcf\xd3\n")
 

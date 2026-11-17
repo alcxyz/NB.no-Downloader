@@ -19,6 +19,9 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/browser"
+	"github.com/alcxyz/NB.no-Downloader/internal/nb"
 )
 
 const startURL = "https://www.nb.no/"
@@ -117,11 +120,11 @@ func browse(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	b, l, err := launchBrowser(false)
+	b, l, err := browser.Launch(false)
 	if err != nil {
 		return err
 	}
-	defer waitExit(l)
+	defer browser.WaitExit(l)
 	defer b.Close()
 
 	first, err := b.Page(proto.TargetCreateTarget{URL: "about:blank"})
@@ -146,7 +149,7 @@ func runBrowse(ctx context.Context, b *rod.Browser, first *rod.Page, url, dir st
 			// Read the cookies for each book, so a login made while
 			// browsing is used; once the window is closed, queued books
 			// use the last cookies read.
-			if c, err := nbCookies(b); err == nil {
+			if c, err := browser.Cookies(b); err == nil {
 				cookies = c
 			}
 			browseDownload(ctx, cookies, job, dir, opts)
@@ -237,25 +240,25 @@ func browseDownload(ctx context.Context, cookies []*http.Cookie, job browseJob, 
 	fail := func(err error) {
 		fmt.Fprintf(os.Stderr, "failed %s: %v\n", job.req.URL, err)
 		msg := "Failed, click to retry"
-		if errors.Is(err, errAuth) {
+		if errors.Is(err, nb.ErrAuth) {
 			msg = "Access denied, click to retry"
 		}
 		status(msg, true)
 	}
 
-	identifier, err := resolveIdentifier(key, "")
+	identifier, err := nb.ResolveIdentifier(key, "")
 	if err != nil {
 		fail(err)
 		return
 	}
-	d, err := newDownloader(cookies)
+	d, err := nb.New(cookies)
 	if err != nil {
 		fail(err)
 		return
 	}
 
 	status("Starting", false)
-	book, err := d.fetchBook(ctx, identifier)
+	book, err := d.FetchBook(ctx, identifier)
 	if err != nil {
 		fail(err)
 		return
@@ -347,7 +350,7 @@ func defaultDownloadDir() string {
 // bookFileName names a file after the book's title, keeping the id so two
 // editions with the same title do not overwrite each other.
 func bookFileName(title, identifier, ext string) string {
-	id := outputStem(identifier, identifier)
+	id := nb.OutputStem(identifier, identifier)
 	title = strings.ReplaceAll(title, " : ", " - ")
 	title = strings.Map(func(r rune) rune {
 		switch {

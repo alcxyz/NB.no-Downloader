@@ -1,9 +1,11 @@
-package main
+package layout
 
 import (
 	"sort"
 	"strings"
 	"unicode"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/ocr"
 )
 
 // Charts reach the OCR as many pieces: the drawing, which it reads as
@@ -29,7 +31,7 @@ const (
 )
 
 // roleOf decides what a block may become in a chart.
-func roleOf(b textBlock, col rect) int {
+func roleOf(b ocr.Block, col ocr.Rect) int {
 	switch {
 	case b.Image:
 		return roleSeed
@@ -52,35 +54,35 @@ const minGapPicture = 0.1
 // or nothing: a photograph or map OCR did not recognise ("EBA" and "LBA"
 // over two photos of boats). Stretches that turn out to be empty paper are
 // dropped when the picture is fetched.
-func gapPictures(blocks []textBlock, pg *textPage) []textBlock {
+func gapPictures(blocks []ocr.Block, pg *ocr.Page) []ocr.Block {
 	col := textColumn(blocks, pg)
 	// The text, top to bottom: OCR does not always list it in that order.
-	var text []rect
+	var text []ocr.Rect
 	for _, b := range blocks {
 		if !b.Image && !gapFiller(b, col) {
 			text = append(text, b.Box)
 		}
 	}
 	sort.Slice(text, func(i, j int) bool { return text[i].Y0 < text[j].Y0 })
-	var gaps []rect
+	var gaps []ocr.Rect
 	for i := 1; i < len(text); i++ {
 		bottom := text[0].Y1
 		for _, r := range text[:i] {
 			bottom = max(bottom, r.Y1)
 		}
 		if text[i].Y0-bottom >= minGapPicture*pg.Height {
-			gaps = append(gaps, rect{col.X0, bottom, col.X1, text[i].Y0})
+			gaps = append(gaps, ocr.Rect{X0: col.X0, Y0: bottom, X1: col.X1, Y1: text[i].Y0})
 		}
 	}
 	if len(gaps) == 0 {
 		return blocks
 	}
 	// Each picture goes before the first block below it.
-	var out []textBlock
+	var out []ocr.Block
 	for _, b := range blocks {
 		for k := 0; k < len(gaps); k++ {
 			if b.Box.Y0 >= gaps[k].Y1 && !b.Image && !gapFiller(b, col) {
-				out = append(out, textBlock{Box: gaps[k], Image: true})
+				out = append(out, ocr.Block{Box: gaps[k], Image: true})
 				gaps = append(gaps[:k], gaps[k+1:]...)
 				k--
 			}
@@ -88,14 +90,14 @@ func gapPictures(blocks []textBlock, pg *textPage) []textBlock {
 		out = append(out, b)
 	}
 	for _, g := range gaps {
-		out = append(out, textBlock{Box: g, Image: true})
+		out = append(out, ocr.Block{Box: g, Image: true})
 	}
 	return out
 }
 
 // gapFiller reports whether a block may sit in a picture OCR did not see:
 // a drawing it tried to read, or short labels ("EBA", "Øysunde").
-func gapFiller(b textBlock, col rect) bool {
+func gapFiller(b ocr.Block, col ocr.Rect) bool {
 	if roleOf(b, col) == roleSeed {
 		return true
 	}
@@ -119,8 +121,8 @@ var captionWords = map[string]bool{
 // splitCaptions separates a figure's number and title, or its source, from
 // a chart OCR read as part of the same block: the caption lines are text,
 // the rest a chart.
-func splitCaptions(b textBlock) []textBlock {
-	part := func(ls []textLine) textBlock { return textBlock{Lines: ls, Box: boxOf(ls)} }
+func splitCaptions(b ocr.Block) []ocr.Block {
+	part := func(ls []ocr.Line) ocr.Block { return ocr.Block{Lines: ls, Box: boxOf(ls)} }
 	if len(b.Lines) <= 4 {
 		// A chart's scale or legend, or a table's column heads, set
 		// right under its number ("FIGUR 3a" over "Minimum Medium
@@ -135,23 +137,23 @@ func splitCaptions(b textBlock) []textBlock {
 				n--
 			}
 			if n < len(b.Lines) {
-				return []textBlock{part(b.Lines[:n]), part(b.Lines[n:])}
+				return []ocr.Block{part(b.Lines[:n]), part(b.Lines[n:])}
 			}
 		}
-		return []textBlock{b}
+		return []ocr.Block{b}
 	}
-	opens := func(l textLine) bool {
-		return caption(textBlock{Lines: []textLine{l}})
+	opens := func(l ocr.Line) bool {
+		return caption(ocr.Block{Lines: []ocr.Line{l}})
 	}
-	titleLine := func(l textLine) bool {
+	titleLine := func(l ocr.Line) bool {
 		var conf float64
 		for _, w := range l.Words {
 			conf += w.Conf
 		}
-		tb := textBlock{Lines: []textLine{l}}
+		tb := ocr.Block{Lines: []ocr.Line{l}}
 		return len(l.Words) >= 3 && letterShare(tb) >= 0.6 && conf/float64(len(l.Words)) >= doubtConf
 	}
-	var out []textBlock
+	var out []ocr.Block
 	lines := b.Lines
 	if opens(lines[0]) {
 		n := 1
@@ -161,7 +163,7 @@ func splitCaptions(b textBlock) []textBlock {
 		out = append(out, part(lines[:n]))
 		lines = lines[n:]
 	}
-	var source []textLine
+	var source []ocr.Line
 	for k := max(1, len(lines)-3); k < len(lines); k++ {
 		if opens(lines[k]) {
 			source = lines[k:]
@@ -181,7 +183,7 @@ func splitCaptions(b textBlock) []textBlock {
 // read with confidence ("4%", "1900 1910 1920", "-10 %"). A column of
 // figures with no letters at all goes too, such as the years of a chart
 // or the numbers of a list of notes.
-func strayLabel(b textBlock) bool {
+func strayLabel(b ocr.Block) bool {
 	if len(b.Lines) == 1 && chapterNumber(lineText(b.Lines[0])) != "" {
 		return false
 	}
@@ -214,7 +216,7 @@ func strayLabel(b textBlock) bool {
 
 // caption reports whether a block numbers a figure or table or names its
 // source ("FIGUR 2", "Kilde: SSB").
-func caption(b textBlock) bool {
+func caption(b ocr.Block) bool {
 	if len(b.Lines) == 0 || len(b.Lines[0].Words) == 0 {
 		return false
 	}
@@ -224,14 +226,14 @@ func caption(b textBlock) bool {
 
 // prose reports whether a block reads as running text or a figure title:
 // mostly letters, with a line of several words spanning much of the column.
-func prose(b textBlock, col rect) bool {
+func prose(b ocr.Block, col ocr.Rect) bool {
 	if b.Image || letterShare(b) < 0.7 || legendLike(b) || (drawing(b) && !plainText(b)) {
 		return false
 	}
 	// A block of axis values and legend lines OCR read together.
 	chart := 0
 	for _, l := range b.Lines {
-		lb := textBlock{Lines: []textLine{l}}
+		lb := ocr.Block{Lines: []ocr.Line{l}}
 		if letterShare(lb) == 0 || legendLike(lb) {
 			chart++
 		}
@@ -262,7 +264,7 @@ func prose(b textBlock, col rect) bool {
 // as words are. Text in a chart may be as wide, but its words sit far
 // apart, by the bars and lines between them. Layout tells text even where
 // OCR is unsure of it, as of web addresses in a list of references.
-func bodyText(b textBlock, col rect) bool {
+func bodyText(b ocr.Block, col ocr.Rect) bool {
 	full := 0
 	for _, l := range b.Lines {
 		if len(l.Words) >= 5 && l.Box.W() >= col.W()*0.6 && farGap(l) == 0 {
@@ -275,7 +277,7 @@ func bodyText(b textBlock, col rect) bool {
 // textLines reports whether most lines of a block run across the column
 // with words spaced as in text, as uncertain lines of web addresses do;
 // a drawing's text is narrow or spread out.
-func textLines(b textBlock, col rect) bool {
+func textLines(b ocr.Block, col ocr.Rect) bool {
 	n := 0
 	for _, l := range b.Lines {
 		if len(l.Words) > 0 && l.Box.W() >= col.W()*0.6 && farGap(l) == 0 {
@@ -289,7 +291,7 @@ func textLines(b textBlock, col rect) bool {
 // a short reference ("Se Pritchett (2024).") or a column of note numbers,
 // rather than a drawing OCR tried to read: short blocks like these look
 // like chart labels, but only a drawing starts a chart.
-func plainText(b textBlock) bool {
+func plainText(b ocr.Block) bool {
 	var conf float64
 	words := 0
 	for _, l := range b.Lines {
@@ -308,7 +310,7 @@ func plainText(b textBlock) bool {
 // ("—— Fastlands-Norge - ------- Danmark"), or a row of names, mostly
 // capitalised, without the commas and small words of a title ("Offentlig
 // Privat konsentrert Privat distribuert Stiftelse").
-func legendLike(b textBlock) bool {
+func legendLike(b ocr.Block) bool {
 	if len(b.Lines) > 2 {
 		return false
 	}
@@ -375,12 +377,12 @@ func lineSample(w string) bool {
 // line of a neighbouring block: an axis value under a chart's title
 // ("1890-2020, prosent" over "20%"), or one at the end of the title's line
 // ("prosent 40 %"), far to the right of the words before it.
-func splitLabels(b textBlock) []textBlock {
+func splitLabels(b ocr.Block) []ocr.Block {
 	if len(b.Lines) == 0 {
-		return []textBlock{b}
+		return []ocr.Block{b}
 	}
-	var before, after []textBlock
-	label := func(ws []textWord) bool {
+	var before, after []ocr.Block
+	label := func(ws []ocr.Word) bool {
 		if len(ws) == 0 || len(ws) > 3 {
 			return false
 		}
@@ -393,31 +395,31 @@ func splitLabels(b textBlock) []textBlock {
 	}
 	// A line of figures that is not a label lines up with the text it
 	// belongs to, as the years ending a title do ("1870-2013").
-	apart := func(l, other textLine) bool {
+	apart := func(l, other ocr.Line) bool {
 		return strings.Contains(lineText(l), "%") || abs(l.Box.X0-other.Box.X0) > 2*other.Box.H() ||
 			l.Box.H() < 0.7*other.Box.H()
 	}
 	lines := b.Lines
 	for len(lines) > 1 && label(lines[0].Words) && apart(lines[0], lines[1]) {
-		before = append(before, textBlock{Lines: lines[:1], Box: lines[0].Box})
+		before = append(before, ocr.Block{Lines: lines[:1], Box: lines[0].Box})
 		lines = lines[1:]
 	}
 	for len(lines) > 1 && label(lines[len(lines)-1].Words) && apart(lines[len(lines)-1], lines[len(lines)-2]) {
 		l := lines[len(lines)-1]
-		after = append([]textBlock{{Lines: []textLine{l}, Box: l.Box}}, after...)
+		after = append([]ocr.Block{{Lines: []ocr.Line{l}, Box: l.Box}}, after...)
 		lines = lines[:len(lines)-1]
 	}
 	// A label far to the right on the last line.
 	last := lines[len(lines)-1]
 	if cut := farGap(last); cut > 0 && label(last.Words[cut:]) {
-		head := textLine{Words: last.Words[:cut]}
-		tail := textLine{Words: last.Words[cut:]}
+		head := ocr.Line{Words: last.Words[:cut]}
+		tail := ocr.Line{Words: last.Words[cut:]}
 		head.Box, tail.Box = wordsBox(head.Words), wordsBox(tail.Words)
-		lines = append(append([]textLine{}, lines[:len(lines)-1]...), head)
-		after = append([]textBlock{{Lines: []textLine{tail}, Box: tail.Box}}, after...)
+		lines = append(append([]ocr.Line{}, lines[:len(lines)-1]...), head)
+		after = append([]ocr.Block{{Lines: []ocr.Line{tail}, Box: tail.Box}}, after...)
 	}
 	if len(before) == 0 && len(after) == 0 {
-		return []textBlock{b}
+		return []ocr.Block{b}
 	}
 	b.Lines = lines
 	b.Box = boxOf(lines)
@@ -430,7 +432,7 @@ func splitLabels(b textBlock) []textBlock {
 // joinBrokenLines puts back a line OCR set apart from the line above it
 // that ends with a comma, such as the end of a chart's title ("1993-2022",
 // "milliarder kroner"), which would otherwise pass for a label.
-func joinBrokenLines(blocks []textBlock, lh float64) []textBlock {
+func joinBrokenLines(blocks []ocr.Block, lh float64) []ocr.Block {
 	for i := 0; i < len(blocks); i++ {
 		b := &blocks[i]
 		if b.Image || len(b.Lines) == 0 || !strings.HasSuffix(strings.TrimSpace(lineText(b.Lines[len(b.Lines)-1])), ",") {
@@ -442,7 +444,7 @@ func joinBrokenLines(blocks []textBlock, lh float64) []textBlock {
 				continue
 			}
 			b.Lines = append(b.Lines, c.Lines[0])
-			b.Box = b.Box.union(c.Box)
+			b.Box = b.Box.Union(c.Box)
 			blocks = append(blocks[:j], blocks[j+1:]...)
 			if j < i {
 				i--
@@ -456,7 +458,7 @@ func joinBrokenLines(blocks []textBlock, lh float64) []textBlock {
 
 // tableLike reports whether most lines of a block are rows of a table:
 // a label and, far to its right, a figure.
-func tableLike(b textBlock) bool {
+func tableLike(b ocr.Block) bool {
 	rows := 0
 	for _, l := range b.Lines {
 		if farGap(l) > 0 && strings.ContainsAny(lineText(l), "0123456789") {
@@ -466,7 +468,7 @@ func tableLike(b textBlock) bool {
 	return len(b.Lines) >= 3 && 2*rows >= len(b.Lines)
 }
 
-func farGap(l textLine) int {
+func farGap(l ocr.Line) int {
 	h := l.Box.H()
 	for i := 1; i < len(l.Words); i++ {
 		if l.Words[i].Box.X0-l.Words[i-1].Box.X1 > 3*h {
@@ -476,17 +478,17 @@ func farGap(l textLine) int {
 	return 0
 }
 
-func wordsBox(ws []textWord) rect {
-	var r rect
+func wordsBox(ws []ocr.Word) ocr.Rect {
+	var r ocr.Rect
 	for _, w := range ws {
-		r = r.union(w.Box)
+		r = r.Union(w.Box)
 	}
 	return r
 }
 
 // assembleFigures replaces each chart's pieces with one picture block
 // covering them, placed where its first piece was.
-func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock {
+func assembleFigures(blocks []ocr.Block, pg *ocr.Page, st bookStats) []ocr.Block {
 	col := textColumn(blocks, pg)
 	lh := st.bodyLH * pg.Height
 	if lh <= 0 {
@@ -502,7 +504,7 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 	// Regions are named by their first seed; alive marks those not merged
 	// into another.
 	owner := make([]int, len(blocks)) // the block's region, or -1
-	box := make([]rect, len(blocks))
+	box := make([]ocr.Rect, len(blocks))
 	alive := make([]bool, len(blocks))
 	for i := range blocks {
 		owner[i] = -1
@@ -513,7 +515,7 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 	// A chart framed by a figure number and title above and its source
 	// below is everything between them that is not text, even where OCR
 	// found no drawing, only labels.
-	frame := map[int]rect{} // a framed chart's region fills its frame
+	frame := map[int]ocr.Rect{} // a framed chart's region fills its frame
 	for _, fb := range figureBands(blocks, role, col, lh) {
 		band := fb.blocks
 		first := band[0]
@@ -523,7 +525,7 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 				alive[owner[k]] = false
 			}
 			owner[k] = first
-			box[first] = box[first].union(blocks[k].Box)
+			box[first] = box[first].Union(blocks[k].Box)
 		}
 		alive[first] = true
 		for k := range owner {
@@ -534,7 +536,7 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 	}
 	// blocked reports whether text stands between two boxes, one above the
 	// other: a chart does not reach past its caption or the running text.
-	blocked := func(a, c rect) bool {
+	blocked := func(a, c ocr.Rect) bool {
 		top, bottom := a, c
 		if c.Y0 < a.Y0 {
 			top, bottom = c, a
@@ -556,7 +558,7 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 				owner[k] = into
 			}
 		}
-		box[into] = box[into].union(box[from])
+		box[into] = box[into].Union(box[from])
 		alive[from] = false
 	}
 	for changed := true; changed; {
@@ -585,7 +587,7 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 				}
 				if (gap(rb, b.Box) <= reach && !blocked(rb, b.Box)) || inside(b.Box, rb) {
 					owner[i] = r
-					box[r] = rb.union(b.Box)
+					box[r] = rb.Union(b.Box)
 					changed = true
 					break
 				}
@@ -620,7 +622,7 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 		}
 	}
 	pad := figurePadding * lh
-	var out []textBlock
+	var out []ocr.Block
 	for i, b := range blocks {
 		r := owner[i]
 		switch {
@@ -629,14 +631,14 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 		case r >= 0 && firstOwned(owner, r) == i:
 			rb := box[r]
 			if f, ok := frame[r]; ok {
-				rb = rb.union(f)
+				rb = rb.Union(f)
 			}
-			rb = rect{max(0, rb.X0-pad), max(0, rb.Y0-pad), min(pg.Width, rb.X1+pad), min(pg.Height, rb.Y1+pad)}
+			rb = ocr.Rect{X0: max(0, rb.X0-pad), Y0: max(0, rb.Y0-pad), X1: min(pg.Width, rb.X1+pad), Y1: min(pg.Height, rb.Y1+pad)}
 			chart := box[r]
 			if f, ok := frame[r]; ok {
-				chart = chart.union(f)
+				chart = chart.Union(f)
 			}
-			out = append(out, textBlock{Box: clearOfText(rb, chart, blocks, kept, lh), Image: true})
+			out = append(out, ocr.Block{Box: clearOfText(rb, chart, blocks, kept, lh), Image: true})
 		}
 	}
 	// OCR sometimes reads a picture before the caption printed above it.
@@ -662,7 +664,7 @@ func assembleFigures(blocks []textBlock, pg *textPage, st bookStats) []textBlock
 // above and below it, such as the caption and the source line, so the
 // picture shows no slivers of lines that are also in the text. An edge is
 // moved only as far as the chart itself allows.
-func clearOfText(rb, chart rect, blocks []textBlock, kept []bool, lh float64) rect {
+func clearOfText(rb, chart ocr.Rect, blocks []ocr.Block, kept []bool, lh float64) ocr.Rect {
 	mid := (chart.Y0 + chart.Y1) / 2
 	for i, b := range blocks {
 		if !kept[i] || b.Image {
@@ -694,8 +696,8 @@ func clearOfText(rb, chart rect, blocks []textBlock, kept []bool, lh float64) re
 
 // numberColumn marks lone numbers stacked at one left edge, three or more
 // to a page: the numbers of notes or references printed beside them.
-func numberColumn(blocks []textBlock, lh float64) []bool {
-	lone := func(b textBlock) bool {
+func numberColumn(blocks []ocr.Block, lh float64) []bool {
+	lone := func(b ocr.Block) bool {
 		return len(b.Lines) == 1 && len(b.Lines[0].Words) == 1 && !b.Image &&
 			strings.Trim(b.Lines[0].Words[0].Text, "0123456789.") == ""
 	}
@@ -726,10 +728,10 @@ func numberColumn(blocks []textBlock, lh float64) []bool {
 // and its source below, and the frame: the column's width between them.
 type figureBand struct {
 	blocks []int
-	frame  rect
+	frame  ocr.Rect
 }
 
-func figureBands(blocks []textBlock, role []int, col rect, lh float64) []figureBand {
+func figureBands(blocks []ocr.Block, role []int, col ocr.Rect, lh float64) []figureBand {
 	var bands []figureBand
 	for i, b := range blocks {
 		// The number on a short line of its own, not a sentence of the
@@ -749,7 +751,7 @@ func figureBands(blocks []textBlock, role []int, col rect, lh float64) []figureB
 		for j := i + 1; j < len(blocks); j++ {
 			if (caption(blocks[j]) || bodyText(blocks[j], col)) && blocks[j].Box.Y0 > top {
 				bottom = blocks[j].Box.Y0
-				width = width.union(blocks[j].Box)
+				width = width.Union(blocks[j].Box)
 				break
 			}
 		}
@@ -774,7 +776,7 @@ func figureBands(blocks []textBlock, role []int, col rect, lh float64) []figureB
 			drawn = drawn || role[j] != roleText
 		}
 		if len(band) > 0 && (drawn || !toEnd) {
-			bands = append(bands, figureBand{band, rect{width.X0, top + lh/4, width.X1, bottom - lh/4}})
+			bands = append(bands, figureBand{band, ocr.Rect{X0: width.X0, Y0: top + lh/4, X1: width.X1, Y1: bottom - lh/4}})
 		}
 	}
 	return bands
@@ -782,7 +784,7 @@ func figureBands(blocks []textBlock, role []int, col rect, lh float64) []figureB
 
 // figureNumber reports whether a block numbers a figure or table
 // ("FIGUR 31", "TABELL 4").
-func figureNumber(b textBlock) bool {
+func figureNumber(b ocr.Block) bool {
 	if len(b.Lines) == 0 || len(b.Lines[0].Words) < 2 {
 		return false
 	}
@@ -808,18 +810,18 @@ func abs(x float64) float64 {
 }
 
 // gap is the distance between two boxes, zero when they overlap.
-func gap(a, b rect) float64 {
+func gap(a, b ocr.Rect) float64 {
 	dx := max(0, max(a.X0, b.X0)-min(a.X1, b.X1))
 	dy := max(0, max(a.Y0, b.Y0)-min(a.Y1, b.Y1))
 	return max(dx, dy)
 }
 
 // within reports whether a lies wholly within b.
-func within(a, b rect, slack float64) bool {
+func within(a, b ocr.Rect, slack float64) bool {
 	return a.X0 >= b.X0-slack && a.Y0 >= b.Y0-slack && a.X1 <= b.X1+slack && a.Y1 <= b.Y1+slack
 }
 
-func textOf(b textBlock) string {
+func textOf(b ocr.Block) string {
 	var parts []string
 	for _, l := range b.Lines {
 		parts = append(parts, lineText(l))
@@ -828,7 +830,7 @@ func textOf(b textBlock) string {
 }
 
 // inside reports whether the middle of a lies within b.
-func inside(a, b rect) bool {
+func inside(a, b ocr.Rect) bool {
 	x, y := (a.X0+a.X1)/2, (a.Y0+a.Y1)/2
 	return x > b.X0 && x < b.X1 && y > b.Y0 && y < b.Y1
 }
