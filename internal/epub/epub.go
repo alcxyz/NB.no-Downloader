@@ -1,4 +1,5 @@
-package main
+// Package epub writes and validates EPUB 3 files.
+package epub
 
 import (
 	"archive/zip"
@@ -16,8 +17,8 @@ import (
 // now is replaced in tests so dcterms:modified is reproducible.
 var now = time.Now
 
-// bookMeta is the catalogue metadata written into the EPUB package document.
-type bookMeta struct {
+// Meta is the catalogue metadata written into the EPUB package document.
+type Meta struct {
 	Title        string
 	Subtitle     string   // may be empty
 	Authors      []string // display names, "Sigrid Undset"
@@ -33,24 +34,25 @@ type bookMeta struct {
 	Source       string // URL of the book on nb.no
 }
 
-// epubImage is an image file inside the EPUB.
-type epubImage struct {
+// Image is an image file inside the EPUB.
+type Image struct {
 	Name      string // file name, unique, e.g. "p0012.jpg"; chapters reference it as "images/<Name>"
 	Data      []byte
 	MediaType string // "image/jpeg" or "image/png"
 }
 
-// epubChapter is one XHTML content document.
-type epubChapter struct {
+// Chapter is one XHTML content document.
+type Chapter struct {
 	Title string // used in the table of contents; may be empty (then omit from TOC but keep in spine)
 	Body  string // XHTML fragment that goes inside <body>, already escaped by the caller
 }
 
-type epubBook struct {
-	Meta     bookMeta
-	Cover    *epubImage // may be nil
-	Chapters []epubChapter
-	Images   []epubImage // images referenced from chapter bodies, excluding Cover
+// Book is what goes into an EPUB.
+type Book struct {
+	Meta     Meta
+	Cover    *Image // may be nil
+	Chapters []Chapter
+	Images   []Image // images referenced from chapter bodies, excluding Cover
 }
 
 const epubCSS = `body { margin: 0 1em; line-height: 1.4; }
@@ -72,8 +74,8 @@ div.cover { margin: 0; padding: 0; height: 100%; text-align: center; }
 div.cover img { max-width: 100%; max-height: 100%; height: 100%; }
 `
 
-// writeEPUB writes b as an EPUB 3 file that also works in EPUB 2 readers.
-func writeEPUB(w io.Writer, b *epubBook) error {
+// Write writes b as an EPUB 3 file that also works in EPUB 2 readers.
+func Write(w io.Writer, b *Book) error {
 	if err := validateEPUB(b); err != nil {
 		return err
 	}
@@ -135,12 +137,12 @@ func writeEPUB(w io.Writer, b *epubBook) error {
 		}
 	}
 	for i, ch := range b.Chapters {
-		if err := add("OEBPS/"+chapterFile(i), []byte(buildChapter(b, ch, lang))); err != nil {
+		if err := add("OEBPS/"+ChapterFile(i), []byte(buildChapter(b, ch, lang))); err != nil {
 			return err
 		}
 	}
 	// Images are already compressed; deflating them again only costs time.
-	addStored := func(img epubImage) error {
+	addStored := func(img Image) error {
 		fw, err := z.CreateHeader(&zip.FileHeader{Name: "OEBPS/images/" + img.Name, Method: zip.Store, Modified: modified})
 		if err != nil {
 			return err
@@ -161,7 +163,7 @@ func writeEPUB(w io.Writer, b *epubBook) error {
 	return z.Close()
 }
 
-func validateEPUB(b *epubBook) error {
+func validateEPUB(b *Book) error {
 	if b == nil {
 		return errors.New("epub: nil book")
 	}
@@ -182,7 +184,7 @@ func validateEPUB(b *epubBook) error {
 	}
 
 	seen := make(map[string]bool)
-	check := func(img epubImage) error {
+	check := func(img Image) error {
 		if err := validateImage(img); err != nil {
 			return err
 		}
@@ -214,7 +216,7 @@ func validateEPUB(b *epubBook) error {
 	return nil
 }
 
-func validateImage(img epubImage) error {
+func validateImage(img Image) error {
 	if img.Name == "" {
 		return errors.New("epub: image with empty name")
 	}
@@ -284,10 +286,10 @@ func validW3CDate(s string) bool {
 	return false
 }
 
-// xmlEscape escapes s for XML text and attribute values. Characters that
+// Escape escapes s for XML text and attribute values. Characters that
 // XML 1.0 forbids (most C0 controls, which OCR output sometimes contains)
 // are dropped, since no escape can make them legal.
-func xmlEscape(s string) string {
+func Escape(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
@@ -319,7 +321,8 @@ func validXMLChar(r rune) bool {
 		r >= 0x10000 && r <= 0x10FFFF
 }
 
-func chapterFile(i int) string {
+// ChapterFile is the file name of chapter i in the EPUB.
+func ChapterFile(i int) string {
 	return fmt.Sprintf("chapter%03d.xhtml", i+1)
 }
 
@@ -339,54 +342,54 @@ const containerXML = `<?xml version="1.0" encoding="UTF-8"?>
 </container>
 `
 
-func buildOPF(b *epubBook, lang string, modified time.Time) string {
+func buildOPF(b *Book, lang string, modified time.Time) string {
 	m := b.Meta
 	var s strings.Builder
 	s.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	fmt.Fprintf(&s, `<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="%s">`+"\n", xmlEscape(lang))
+	fmt.Fprintf(&s, `<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid" xml:lang="%s">`+"\n", Escape(lang))
 	s.WriteString(`  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">` + "\n")
 
-	fmt.Fprintf(&s, "    <dc:identifier id=\"bookid\">%s</dc:identifier>\n", xmlEscape(m.Identifier))
+	fmt.Fprintf(&s, "    <dc:identifier id=\"bookid\">%s</dc:identifier>\n", Escape(m.Identifier))
 	for i, isbn := range m.ISBNs {
-		fmt.Fprintf(&s, "    <dc:identifier id=\"isbn%d\">urn:isbn:%s</dc:identifier>\n", i+1, xmlEscape(isbn))
+		fmt.Fprintf(&s, "    <dc:identifier id=\"isbn%d\">urn:isbn:%s</dc:identifier>\n", i+1, Escape(isbn))
 	}
 
-	fmt.Fprintf(&s, "    <dc:title id=\"title\">%s</dc:title>\n", xmlEscape(m.Title))
+	fmt.Fprintf(&s, "    <dc:title id=\"title\">%s</dc:title>\n", Escape(m.Title))
 	if m.Subtitle != "" {
 		s.WriteString("    <meta refines=\"#title\" property=\"title-type\">main</meta>\n")
-		fmt.Fprintf(&s, "    <dc:title id=\"subtitle\">%s</dc:title>\n", xmlEscape(m.Subtitle))
+		fmt.Fprintf(&s, "    <dc:title id=\"subtitle\">%s</dc:title>\n", Escape(m.Subtitle))
 		s.WriteString("    <meta refines=\"#subtitle\" property=\"title-type\">subtitle</meta>\n")
 	}
 
 	for i, a := range m.Authors {
 		id := fmt.Sprintf("creator%d", i+1)
-		fmt.Fprintf(&s, "    <dc:creator id=\"%s\">%s</dc:creator>\n", id, xmlEscape(a))
+		fmt.Fprintf(&s, "    <dc:creator id=\"%s\">%s</dc:creator>\n", id, Escape(a))
 		fmt.Fprintf(&s, "    <meta refines=\"#%s\" property=\"role\" scheme=\"marc:relators\">aut</meta>\n", id)
 		if len(m.AuthorsSort) > 0 && m.AuthorsSort[i] != "" {
-			fmt.Fprintf(&s, "    <meta refines=\"#%s\" property=\"file-as\">%s</meta>\n", id, xmlEscape(m.AuthorsSort[i]))
+			fmt.Fprintf(&s, "    <meta refines=\"#%s\" property=\"file-as\">%s</meta>\n", id, Escape(m.AuthorsSort[i]))
 		}
 	}
 	for _, c := range m.Contributors {
-		fmt.Fprintf(&s, "    <dc:contributor>%s</dc:contributor>\n", xmlEscape(c))
+		fmt.Fprintf(&s, "    <dc:contributor>%s</dc:contributor>\n", Escape(c))
 	}
 
-	fmt.Fprintf(&s, "    <dc:language>%s</dc:language>\n", xmlEscape(lang))
+	fmt.Fprintf(&s, "    <dc:language>%s</dc:language>\n", Escape(lang))
 	if m.Publisher != "" {
-		fmt.Fprintf(&s, "    <dc:publisher>%s</dc:publisher>\n", xmlEscape(m.Publisher))
+		fmt.Fprintf(&s, "    <dc:publisher>%s</dc:publisher>\n", Escape(m.Publisher))
 	}
 	if m.Date != "" {
-		fmt.Fprintf(&s, "    <dc:date>%s</dc:date>\n", xmlEscape(m.Date))
+		fmt.Fprintf(&s, "    <dc:date>%s</dc:date>\n", Escape(m.Date))
 	}
 	for _, subj := range m.Subjects {
 		if subj != "" {
-			fmt.Fprintf(&s, "    <dc:subject>%s</dc:subject>\n", xmlEscape(subj))
+			fmt.Fprintf(&s, "    <dc:subject>%s</dc:subject>\n", Escape(subj))
 		}
 	}
 	if m.Description != "" {
-		fmt.Fprintf(&s, "    <dc:description>%s</dc:description>\n", xmlEscape(m.Description))
+		fmt.Fprintf(&s, "    <dc:description>%s</dc:description>\n", Escape(m.Description))
 	}
 	if m.Source != "" {
-		fmt.Fprintf(&s, "    <dc:source>%s</dc:source>\n", xmlEscape(m.Source))
+		fmt.Fprintf(&s, "    <dc:source>%s</dc:source>\n", Escape(m.Source))
 	}
 	fmt.Fprintf(&s, "    <meta property=\"dcterms:modified\">%s</meta>\n", modified.Format("2006-01-02T15:04:05Z"))
 	if b.Cover != nil {
@@ -404,7 +407,7 @@ func buildOPF(b *epubBook, lang string, modified time.Time) string {
 		s.WriteString("    <item id=\"cover\" href=\"cover.xhtml\" media-type=\"application/xhtml+xml\"/>\n")
 	}
 	for i := range b.Chapters {
-		fmt.Fprintf(&s, "    <item id=\"%s\" href=\"%s\" media-type=\"application/xhtml+xml\"/>\n", chapterID(i), chapterFile(i))
+		fmt.Fprintf(&s, "    <item id=\"%s\" href=\"%s\" media-type=\"application/xhtml+xml\"/>\n", chapterID(i), ChapterFile(i))
 	}
 	for i, img := range b.Images {
 		fmt.Fprintf(&s, "    <item id=\"%s\" href=\"images/%s\" media-type=\"%s\"/>\n", imageID(i), img.Name, img.MediaType)
@@ -425,7 +428,7 @@ func buildOPF(b *epubBook, lang string, modified time.Time) string {
 	if b.Cover != nil {
 		s.WriteString("    <reference type=\"cover\" title=\"Cover\" href=\"cover.xhtml\"/>\n")
 	}
-	fmt.Fprintf(&s, "    <reference type=\"text\" title=\"%s\" href=\"%s\"/>\n", xmlEscape(m.Title), chapterFile(0))
+	fmt.Fprintf(&s, "    <reference type=\"text\" title=\"%s\" href=\"%s\"/>\n", Escape(m.Title), ChapterFile(0))
 	s.WriteString("  </guide>\n")
 	s.WriteString("</package>\n")
 	return s.String()
@@ -439,15 +442,15 @@ type tocEntry struct {
 
 // tocEntries lists titled chapters. Both nav and NCX must contain at least
 // one entry, so a book without chapter titles gets one pointing at its start.
-func tocEntries(b *epubBook) []tocEntry {
+func tocEntries(b *Book) []tocEntry {
 	var entries []tocEntry
 	for i, ch := range b.Chapters {
 		if ch.Title != "" {
-			entries = append(entries, tocEntry{title: ch.Title, href: chapterFile(i)})
+			entries = append(entries, tocEntry{title: ch.Title, href: ChapterFile(i)})
 		}
 	}
 	if len(entries) == 0 {
-		entries = append(entries, tocEntry{title: b.Meta.Title, href: chapterFile(0)})
+		entries = append(entries, tocEntry{title: b.Meta.Title, href: ChapterFile(0)})
 	}
 	return entries
 }
@@ -457,61 +460,61 @@ func tocEntries(b *epubBook) []tocEntry {
 func xhtmlHead(s *strings.Builder, lang, title string) {
 	s.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE html>\n")
 	s.WriteString(`<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"`)
-	fmt.Fprintf(s, " xml:lang=\"%s\" lang=\"%s\">\n", xmlEscape(lang), xmlEscape(lang))
-	fmt.Fprintf(s, "<head>\n  <meta charset=\"utf-8\"/>\n  <title>%s</title>\n", xmlEscape(title))
+	fmt.Fprintf(s, " xml:lang=\"%s\" lang=\"%s\">\n", Escape(lang), Escape(lang))
+	fmt.Fprintf(s, "<head>\n  <meta charset=\"utf-8\"/>\n  <title>%s</title>\n", Escape(title))
 	s.WriteString("  <link rel=\"stylesheet\" type=\"text/css\" href=\"style.css\"/>\n</head>\n")
 }
 
-func buildNav(b *epubBook, lang string) string {
+func buildNav(b *Book, lang string) string {
 	var s strings.Builder
 	xhtmlHead(&s, lang, b.Meta.Title)
 	s.WriteString("<body>\n  <nav epub:type=\"toc\" id=\"toc\">\n")
-	fmt.Fprintf(&s, "    <h1>%s</h1>\n    <ol>\n", xmlEscape(b.Meta.Title))
+	fmt.Fprintf(&s, "    <h1>%s</h1>\n    <ol>\n", Escape(b.Meta.Title))
 	for _, e := range tocEntries(b) {
-		fmt.Fprintf(&s, "      <li><a href=\"%s\">%s</a></li>\n", e.href, xmlEscape(e.title))
+		fmt.Fprintf(&s, "      <li><a href=\"%s\">%s</a></li>\n", e.href, Escape(e.title))
 	}
 	s.WriteString("    </ol>\n  </nav>\n")
 	s.WriteString("  <nav epub:type=\"landmarks\" id=\"landmarks\" hidden=\"hidden\">\n    <ol>\n")
 	if b.Cover != nil {
 		s.WriteString("      <li><a epub:type=\"cover\" href=\"cover.xhtml\">Cover</a></li>\n")
 	}
-	fmt.Fprintf(&s, "      <li><a epub:type=\"bodymatter\" href=\"%s\">%s</a></li>\n", chapterFile(0), xmlEscape(b.Meta.Title))
+	fmt.Fprintf(&s, "      <li><a epub:type=\"bodymatter\" href=\"%s\">%s</a></li>\n", ChapterFile(0), Escape(b.Meta.Title))
 	s.WriteString("    </ol>\n  </nav>\n</body>\n</html>\n")
 	return s.String()
 }
 
-func buildNCX(b *epubBook, lang string) string {
+func buildNCX(b *Book, lang string) string {
 	var s strings.Builder
 	s.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
-	fmt.Fprintf(&s, `<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="%s">`+"\n", xmlEscape(lang))
+	fmt.Fprintf(&s, `<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1" xml:lang="%s">`+"\n", Escape(lang))
 	s.WriteString("  <head>\n")
 	// dtb:uid must equal the package's unique identifier.
-	fmt.Fprintf(&s, "    <meta name=\"dtb:uid\" content=\"%s\"/>\n", xmlEscape(b.Meta.Identifier))
+	fmt.Fprintf(&s, "    <meta name=\"dtb:uid\" content=\"%s\"/>\n", Escape(b.Meta.Identifier))
 	s.WriteString("    <meta name=\"dtb:depth\" content=\"1\"/>\n")
 	s.WriteString("    <meta name=\"dtb:totalPageCount\" content=\"0\"/>\n")
 	s.WriteString("    <meta name=\"dtb:maxPageNumber\" content=\"0\"/>\n")
 	s.WriteString("  </head>\n")
-	fmt.Fprintf(&s, "  <docTitle><text>%s</text></docTitle>\n", xmlEscape(b.Meta.Title))
+	fmt.Fprintf(&s, "  <docTitle><text>%s</text></docTitle>\n", Escape(b.Meta.Title))
 	s.WriteString("  <navMap>\n")
 	for i, e := range tocEntries(b) {
 		fmt.Fprintf(&s, "    <navPoint id=\"navpoint%d\" playOrder=\"%d\">\n", i+1, i+1)
-		fmt.Fprintf(&s, "      <navLabel><text>%s</text></navLabel>\n", xmlEscape(e.title))
+		fmt.Fprintf(&s, "      <navLabel><text>%s</text></navLabel>\n", Escape(e.title))
 		fmt.Fprintf(&s, "      <content src=\"%s\"/>\n    </navPoint>\n", e.href)
 	}
 	s.WriteString("  </navMap>\n</ncx>\n")
 	return s.String()
 }
 
-func buildCoverPage(b *epubBook, lang string) string {
+func buildCoverPage(b *Book, lang string) string {
 	var s strings.Builder
 	xhtmlHead(&s, lang, b.Meta.Title)
 	s.WriteString("<body epub:type=\"cover\">\n")
-	fmt.Fprintf(&s, "  <div class=\"cover\"><img src=\"images/%s\" alt=\"%s\"/></div>\n", b.Cover.Name, xmlEscape(b.Meta.Title))
+	fmt.Fprintf(&s, "  <div class=\"cover\"><img src=\"images/%s\" alt=\"%s\"/></div>\n", b.Cover.Name, Escape(b.Meta.Title))
 	s.WriteString("</body>\n</html>\n")
 	return s.String()
 }
 
-func buildChapter(b *epubBook, ch epubChapter, lang string) string {
+func buildChapter(b *Book, ch Chapter, lang string) string {
 	// An empty <title> is reported by epubcheck, so untitled chapters
 	// borrow the book title.
 	title := ch.Title

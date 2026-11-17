@@ -1,4 +1,4 @@
-package main
+package nb
 
 import (
 	"bytes"
@@ -12,9 +12,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -33,23 +30,23 @@ func TestResolveIdentifier(t *testing.T) {
 		{"296c0829d64f7ba7b3a684d912920284", "", "296c0829d64f7ba7b3a684d912920284"},
 	}
 	for _, tt := range tests {
-		got, err := resolveIdentifier(tt.input, tt.docType)
+		got, err := ResolveIdentifier(tt.input, tt.docType)
 		if err != nil || got != tt.want {
 			t.Errorf("resolveIdentifier(%q, %q) = %q, %v; want %q", tt.input, tt.docType, got, err, tt.want)
 		}
 	}
 	for _, bad := range []string{"", "https://www.nb.no/search?q=ibsen"} {
-		if got, err := resolveIdentifier(bad, "digibok"); err == nil {
+		if got, err := ResolveIdentifier(bad, "digibok"); err == nil {
 			t.Errorf("resolveIdentifier(%q) = %q, want error", bad, got)
 		}
 	}
 }
 
 func TestOutputStem(t *testing.T) {
-	if got := outputStem("2008010300041", "URN:NBN:no-nb_digibok_2008010300041"); got != "2008010300041" {
+	if got := OutputStem("2008010300041", "URN:NBN:no-nb_digibok_2008010300041"); got != "2008010300041" {
 		t.Errorf("bare id: got %q", got)
 	}
-	if got := outputStem("https://www.nb.no/items/URN:NBN:no-nb_digibok_1", "URN:NBN:no-nb_digibok_1"); got != "digibok_1" {
+	if got := OutputStem("https://www.nb.no/items/URN:NBN:no-nb_digibok_1", "URN:NBN:no-nb_digibok_1"); got != "digibok_1" {
 		t.Errorf("URL: got %q", got)
 	}
 }
@@ -94,7 +91,7 @@ func TestImageURL(t *testing.T) {
 		1200: "https://x/img/1/full/1200,/0/default.jpg",
 		3000: "https://x/img/1/full/full/0/default.jpg",
 	} {
-		if got := imageURL(p, width); got != want {
+		if got := ImageURL(p, width); got != want {
 			t.Errorf("imageURL(%d) = %q, want %q", width, got, want)
 		}
 	}
@@ -115,7 +112,7 @@ func TestParseCookies(t *testing.T) {
 	if c := netscape[1]; c.Domain != "www.nb.no" || c.Path != "/auth" {
 		t.Errorf("host-only cookie: %+v", c)
 	}
-	if !hasLogin(netscape) {
+	if !HasLogin(netscape) {
 		t.Error("hasLogin = false, want true")
 	}
 }
@@ -218,7 +215,7 @@ func (f *fakeNB) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func newTestDownloader(t *testing.T, srv *httptest.Server, login bool) *downloader {
+func newTestDownloader(t *testing.T, srv *httptest.Server, login bool) *Downloader {
 	t.Helper()
 	var cookies []*http.Cookie
 	if login {
@@ -228,7 +225,7 @@ func newTestDownloader(t *testing.T, srv *httptest.Server, login bool) *download
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := &downloader{
+	d := &Downloader{
 		client:     &http.Client{Jar: jar},
 		manifest:   srv.URL + "/iiif/",
 		authDomain: "127.0.0.1",
@@ -248,17 +245,17 @@ func TestDownloadRetriesAndResumes(t *testing.T) {
 	d := newTestDownloader(t, srv, true)
 	ctx := context.Background()
 
-	book, err := d.fetchBook(ctx, "URN:NBN:no-nb_digibok_1")
+	book, err := d.FetchBook(ctx, "URN:NBN:no-nb_digibok_1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
 	// A page from an earlier run is kept, not fetched again.
-	if err := os.WriteFile(pageFile(dir, 0), fake.jpeg, 0o644); err != nil {
+	if err := os.WriteFile(PageFile(dir, 0), fake.jpeg, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	var progress []int
-	err = d.downloadPages(ctx, book, dir, 0, 2, func(done, total int) { progress = append(progress, done) })
+	err = d.DownloadPages(ctx, book, dir, 0, 2, func(done, total int) { progress = append(progress, done) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,70 +290,15 @@ func TestDownloadPersistentDenial(t *testing.T) {
 	srv := httptest.NewServer(fake)
 	defer srv.Close()
 	d := newTestDownloader(t, srv, false)
-	book, err := d.fetchBook(context.Background(), "x")
+	book, err := d.FetchBook(context.Background(), "x")
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = d.downloadPages(context.Background(), book, t.TempDir(), 0, 1, nil)
-	if !errors.Is(err, errAuth) {
+	err = d.DownloadPages(context.Background(), book, t.TempDir(), 0, 1, nil)
+	if !errors.Is(err, ErrAuth) {
 		t.Fatalf("err = %v, want errAuth", err)
 	}
 	if fake.authSeen["C1 token"] || fake.authSeen["C1 cookie"] {
 		t.Error("anonymous download sent credentials")
-	}
-}
-
-func TestWritePDF(t *testing.T) {
-	dir := t.TempDir()
-	rgb := filepath.Join(dir, "1.jpg")
-	gray := filepath.Join(dir, "2.jpg")
-	os.WriteFile(rgb, testJPEG(t, 100, 150, false), 0o644)
-	os.WriteFile(gray, testJPEG(t, 200, 100, true), 0o644)
-
-	var buf bytes.Buffer
-	err := writePDF(&buf, "Å lykkes", []pdfPage{
-		{Path: rgb, InchesPerPixel: 0.01, OriginalWidth: 1000}, // 10 in wide
-		{Path: gray},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pdf := buf.String()
-
-	if !strings.HasPrefix(pdf, "%PDF-1.4\n") || !strings.HasSuffix(pdf, "%%EOF\n") {
-		t.Fatal("missing PDF header or trailer")
-	}
-	for _, want := range []string{
-		"/Count 2",
-		"/MediaBox [0 0 720.00 1080.00]", // 10 in at 72 pt/in, image aspect 2:3
-		"/MediaBox [0 0 595.28 297.64]",  // no scale: A4 width
-		"/ColorSpace /DeviceRGB",
-		"/ColorSpace /DeviceGray",
-		"/Title <FEFF00C5",
-	} {
-		if !strings.Contains(pdf, want) {
-			t.Errorf("PDF lacks %q", want)
-		}
-	}
-
-	// Every xref entry must point at the start of its object.
-	m := regexp.MustCompile(`(?s)xref\n0 (\d+)\n0000000000 65535 f \n(.*?)trailer`).FindStringSubmatch(pdf)
-	if m == nil {
-		t.Fatal("no xref table")
-	}
-	n, _ := strconv.Atoi(m[1])
-	entries := strings.Split(strings.TrimSpace(m[2]), "\n")
-	if len(entries) != n-1 {
-		t.Fatalf("%d xref entries, header says %d", len(entries), n-1)
-	}
-	for i, e := range entries {
-		off, _ := strconv.Atoi(e[:10])
-		if want := fmt.Sprintf("%d 0 obj", i+1); !strings.HasPrefix(pdf[off:], want) {
-			t.Errorf("xref %d points at %q", i+1, pdf[off:off+12])
-		}
-	}
-	start := regexp.MustCompile(`startxref\n(\d+)`).FindStringSubmatch(pdf)
-	if off, _ := strconv.Atoi(start[1]); !strings.HasPrefix(pdf[off:], "xref") {
-		t.Error("startxref does not point at xref")
 	}
 }

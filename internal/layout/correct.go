@@ -1,9 +1,11 @@
-package main
+package layout
 
 import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/ocr"
 )
 
 // Correcting OCR slips against the book's own vocabulary. A book repeats
@@ -32,21 +34,21 @@ var ocrConfusions = [][2]string{
 // alone because abbreviations and numbers need them.
 const strayMarks = "!|]»«;*^~[{}"
 
-// correctionStats counts what a correction pass did, for reporting.
-type correctionStats struct {
-	doubtful, corrected, markers int
+// CorrectionStats counts what a correction pass did, for reporting.
+type CorrectionStats struct {
+	Doubtful, Corrected, Markers int
 }
 
-// correctWords fixes doubtful words in place across all pages.
-func correctWords(pages []layoutPage) correctionStats {
+// CorrectWords fixes doubtful words in place across all pages.
+func CorrectWords(pages []Page) CorrectionStats {
 	vocab := bookVocabulary(pages)
-	var st correctionStats
+	var st CorrectionStats
 	for _, lp := range pages {
-		eachWord(lp, func(w *textWord) {
+		eachWord(lp, func(w *ocr.Word) {
 			if t := stripNoteMarker(w.Text); t != w.Text {
 				w.Text = t
 				w.Marker = true
-				st.markers++
+				st.Markers++
 			}
 			if w.HypPart2 || w.HypFull != "" {
 				return
@@ -64,20 +66,20 @@ func correctWords(pages []layoutPage) correctionStats {
 			if w.Conf >= doubtConf {
 				return
 			}
-			st.doubtful++
+			st.Doubtful++
 			if fixed := bestCandidate(core, vocab); fixed != "" {
 				w.Text = pre + fixed + post
-				st.corrected++
+				st.Corrected++
 			} else if parts := splitRunTogether(lower, vocab); parts != nil {
 				w.Text = pre + matchCase(strings.Join(parts, " "), core, lower) + post
-				st.corrected++
+				st.Corrected++
 			}
 		})
 	}
 	return st
 }
 
-func eachWord(lp layoutPage, fn func(w *textWord)) {
+func eachWord(lp Page, fn func(w *ocr.Word)) {
 	if lp.Text == nil {
 		return
 	}

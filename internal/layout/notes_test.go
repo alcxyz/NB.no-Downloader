@@ -1,9 +1,12 @@
-package main
+package layout
 
 import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/epub"
+	"github.com/alcxyz/NB.no-Downloader/internal/ocr"
 )
 
 func TestMarkerNumber(t *testing.T) {
@@ -47,8 +50,8 @@ func TestTrimMarker(t *testing.T) {
 
 // A notes page as OCR returns it: the numbers in a column of their own,
 // some in one block, one unreadable ("$2").
-func notesPage() *textPage {
-	return &textPage{Width: 2409, Height: 3559, Blocks: []textBlock{
+func notesPage() *ocr.Page {
+	return &ocr.Page{Width: 2409, Height: 3559, Blocks: []ocr.Block{
 		blockOf(wordsLine("Sluttnoter", 348, 300, 700)),
 		blockOf(wordsLine("50", 441, 484, 480), wordsLine("51", 441, 554, 480), wordsLine("$2", 441, 622, 480),
 			wordsLine("53", 441, 900, 480)),
@@ -122,11 +125,11 @@ func TestKeepRefs(t *testing.T) {
 }
 
 func TestLinkAcross(t *testing.T) {
-	chs := []epubChapter{
-		{Body: noteLinks(xmlEscape("Text" + refMark(4) + " & more"))},
+	chs := []epub.Chapter{
+		{Body: noteLinks(epub.Escape("Text" + refMark(4) + " & more"))},
 		{Body: `<p class="endnote" id="note-4"><a class="noteback" href="#ref-4">4</a> Se Smith.</p>`},
 	}
-	linkAcross(chs)
+	LinkAcross(chs)
 	if !strings.Contains(chs[0].Body, `href="chapter002.xhtml#note-4"`) || !strings.Contains(chs[1].Body, `href="chapter001.xhtml#ref-4"`) {
 		t.Errorf("bodies:\n%s\n%s", chs[0].Body, chs[1].Body)
 	}

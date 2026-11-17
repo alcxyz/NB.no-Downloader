@@ -1,4 +1,4 @@
-package main
+package epub
 
 import (
 	"archive/zip"
@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io"
 	"os"
@@ -29,9 +30,9 @@ func testPNG(t *testing.T) []byte {
 	return b.Bytes()
 }
 
-func testBook(t *testing.T) *epubBook {
-	return &epubBook{
-		Meta: bookMeta{
+func testBook(t *testing.T) *Book {
+	return &Book{
+		Meta: Meta{
 			Title:        "Kristin Lavransdatter",
 			Subtitle:     "Kransen",
 			Authors:      []string{"Sigrid Undset", "Ola Nordmann"},
@@ -46,14 +47,14 @@ func testBook(t *testing.T) *epubBook {
 			Description:  "Første bind.\nOm Kristin & Erlend <1300-tallet>.",
 			Source:       "https://www.nb.no/items/URN:NBN:no-nb_digibok_2008010300041",
 		},
-		Cover: &epubImage{Name: "cover.jpg", Data: testJPEG(t, 60, 90, true), MediaType: "image/jpeg"},
-		Chapters: []epubChapter{
-			{Title: "Første kapittel", Body: "<h1>Første kapittel</h1>\n<p>" + xmlEscape("Å lykkes med æøå & \"sitater\"") + "</p>\n" +
+		Cover: &Image{Name: "cover.jpg", Data: testJPEG(t, 60, 90, true), MediaType: "image/jpeg"},
+		Chapters: []Chapter{
+			{Title: "Første kapittel", Body: "<h1>Første kapittel</h1>\n<p>" + Escape("Å lykkes med æøå & \"sitater\"") + "</p>\n" +
 				"<figure><img src=\"images/p0012.png\" alt=\"Kart\"/></figure>\n<p class=\"note\">1) En fotnote.</p>"},
 			{Title: "", Body: "<p class=\"noindent\">Fortsettelse uten tittel.</p>"},
 			{Title: "Annet kapittel", Body: "<h1>Annet kapittel</h1>\n<p>Blåbærsyltetøy.</p>"},
 		},
-		Images: []epubImage{{Name: "p0012.png", Data: testPNG(t), MediaType: "image/png"}},
+		Images: []Image{{Name: "p0012.png", Data: testPNG(t), MediaType: "image/png"}},
 	}
 }
 
@@ -63,7 +64,7 @@ func writeTestBook(t *testing.T) []byte {
 	now = func() time.Time { return time.Date(2026, 11, 11, 12, 30, 45, 999, time.FixedZone("CET", 3600)) }
 	t.Cleanup(func() { now = orig })
 	var buf bytes.Buffer
-	if err := writeEPUB(&buf, testBook(t)); err != nil {
+	if err := Write(&buf, testBook(t)); err != nil {
 		t.Fatal(err)
 	}
 	return buf.Bytes()
@@ -261,30 +262,30 @@ func TestWriteEPUB(t *testing.T) {
 func TestWriteEPUBValidation(t *testing.T) {
 	cases := []struct {
 		name   string
-		modify func(b *epubBook)
+		modify func(b *Book)
 		want   string
 	}{
-		{"empty identifier", func(b *epubBook) { b.Meta.Identifier = " " }, "identifier"},
-		{"duplicate image", func(b *epubBook) { b.Images = append(b.Images, b.Images[0]) }, "duplicate"},
-		{"duplicate with cover", func(b *epubBook) {
+		{"empty identifier", func(b *Book) { b.Meta.Identifier = " " }, "identifier"},
+		{"duplicate image", func(b *Book) { b.Images = append(b.Images, b.Images[0]) }, "duplicate"},
+		{"duplicate with cover", func(b *Book) {
 			b.Images[0].Name = "COVER.jpg"
 			b.Images[0].MediaType = "image/jpeg"
 			b.Images[0].Data = b.Cover.Data
 		}, "duplicate"},
-		{"media type", func(b *epubBook) { b.Images[0].MediaType = "image/gif" }, "media type"},
-		{"cover media type", func(b *epubBook) { b.Cover.MediaType = "image/webp" }, "media type"},
-		{"data mismatch", func(b *epubBook) { b.Images[0].MediaType = "image/jpeg"; b.Images[0].Name = "p0012.jpg" }, "not JPEG"},
-		{"unsafe name", func(b *epubBook) { b.Images[0].Name = "../x.png" }, "may only contain"},
-		{"no chapters", func(b *epubBook) { b.Chapters = nil }, "no chapters"},
-		{"malformed body", func(b *epubBook) { b.Chapters[0].Body = "<p>a &nbsp; b</p>" }, "chapter 1"},
-		{"sort names", func(b *epubBook) { b.Meta.AuthorsSort = b.Meta.AuthorsSort[:1] }, "sort names"},
-		{"date", func(b *epubBook) { b.Meta.Date = "mai 1994" }, "date"},
+		{"media type", func(b *Book) { b.Images[0].MediaType = "image/gif" }, "media type"},
+		{"cover media type", func(b *Book) { b.Cover.MediaType = "image/webp" }, "media type"},
+		{"data mismatch", func(b *Book) { b.Images[0].MediaType = "image/jpeg"; b.Images[0].Name = "p0012.jpg" }, "not JPEG"},
+		{"unsafe name", func(b *Book) { b.Images[0].Name = "../x.png" }, "may only contain"},
+		{"no chapters", func(b *Book) { b.Chapters = nil }, "no chapters"},
+		{"malformed body", func(b *Book) { b.Chapters[0].Body = "<p>a &nbsp; b</p>" }, "chapter 1"},
+		{"sort names", func(b *Book) { b.Meta.AuthorsSort = b.Meta.AuthorsSort[:1] }, "sort names"},
+		{"date", func(b *Book) { b.Meta.Date = "mai 1994" }, "date"},
 	}
 	for _, c := range cases {
 		b := testBook(t)
 		c.modify(b)
 		var buf bytes.Buffer
-		err := writeEPUB(&buf, b)
+		err := Write(&buf, b)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: err %v, want %q", c.name, err, c.want)
 		}
@@ -295,12 +296,12 @@ func TestWriteEPUBValidation(t *testing.T) {
 }
 
 func TestWriteEPUBMinimal(t *testing.T) {
-	b := &epubBook{
-		Meta:     bookMeta{Title: "Uten tittel", Identifier: "URN:NBN:no-nb_digibok_1"},
-		Chapters: []epubChapter{{Body: "<p>Tekst.</p>"}},
+	b := &Book{
+		Meta:     Meta{Title: "Uten tittel", Identifier: "URN:NBN:no-nb_digibok_1"},
+		Chapters: []Chapter{{Body: "<p>Tekst.</p>"}},
 	}
 	var buf bytes.Buffer
-	if err := writeEPUB(&buf, b); err != nil {
+	if err := Write(&buf, b); err != nil {
 		t.Fatal(err)
 	}
 	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
@@ -323,7 +324,7 @@ func TestWriteEPUBMinimal(t *testing.T) {
 }
 
 func TestXMLEscape(t *testing.T) {
-	got := xmlEscape("a&b<c>d\"e'f æøå\x00\x0b\tg")
+	got := Escape("a&b<c>d\"e'f æøå\x00\x0b\tg")
 	want := "a&amp;b&lt;c&gt;d&quot;e&apos;f æøå\tg"
 	if got != want {
 		t.Errorf("xmlEscape = %q, want %q", got, want)
@@ -333,7 +334,7 @@ func TestXMLEscape(t *testing.T) {
 // TestEPUBCheck validates the test book with the real epubcheck. It is
 // opt-in because epubcheck needs a JVM: run it with
 //
-//	NBDL_EPUBCHECK=1 nix-shell -p epubcheck --run 'go test ./cmd/nbdl -run EPUBCheck -v'
+//	NBDL_EPUBCHECK=1 nix-shell -p epubcheck --run 'go test ./internal/epub -run EPUBCheck -v'
 func TestEPUBCheck(t *testing.T) {
 	if os.Getenv("NBDL_EPUBCHECK") == "" {
 		t.Skip("set NBDL_EPUBCHECK=1 to run epubcheck")
@@ -342,9 +343,9 @@ func TestEPUBCheck(t *testing.T) {
 	if err != nil {
 		t.Skip("epubcheck not on PATH")
 	}
-	books := map[string]*epubBook{"full.epub": testBook(t), "minimal.epub": {
-		Meta:     bookMeta{Title: "Uten tittel", Identifier: "URN:NBN:no-nb_digibok_1"},
-		Chapters: []epubChapter{{Body: "<p>Tekst.</p>"}},
+	books := map[string]*Book{"full.epub": testBook(t), "minimal.epub": {
+		Meta:     Meta{Title: "Uten tittel", Identifier: "URN:NBN:no-nb_digibok_1"},
+		Chapters: []Chapter{{Body: "<p>Tekst.</p>"}},
 	}}
 	for name, b := range books {
 		path := filepath.Join(t.TempDir(), name)
@@ -352,7 +353,7 @@ func TestEPUBCheck(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := writeEPUB(f, b); err != nil {
+		if err := Write(f, b); err != nil {
 			t.Fatal(err)
 		}
 		if err := f.Close(); err != nil {
@@ -369,16 +370,21 @@ func TestEPUBCheck(t *testing.T) {
 	}
 }
 
-func TestKindOf(t *testing.T) {
-	for id, want := range map[string]pageKind{
-		"URN:NBN:no-nb_digibok_2008_C1":   pageCover,
-		"URN:NBN:no-nb_digibok_2008_C3":   pageBack,
-		"URN:NBN:no-nb_digibok_2008_V01":  pageBack,
-		"URN:NBN:no-nb_digibok_2008_I1":   pageNormal,
-		"URN:NBN:no-nb_digibok_2008_0012": pageNormal,
-	} {
-		if got := kindOf(id); got != want {
-			t.Errorf("kindOf(%q) = %v, want %v", id, got, want)
-		}
+func testJPEG(t *testing.T, w, h int, gray bool) []byte {
+	t.Helper()
+	var img image.Image
+	if gray {
+		g := image.NewGray(image.Rect(0, 0, w, h))
+		g.SetGray(1, 1, color.Gray{Y: 200})
+		img = g
+	} else {
+		rgba := image.NewRGBA(image.Rect(0, 0, w, h))
+		rgba.Set(1, 1, color.RGBA{R: 200, A: 255})
+		img = rgba
 	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
 }

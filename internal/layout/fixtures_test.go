@@ -1,4 +1,4 @@
-package main
+package layout
 
 import (
 	"fmt"
@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/ocr"
 )
 
 // TestFixtureBooks lays out real books from work folders kept with
@@ -22,20 +24,20 @@ func TestFixtureBooks(t *testing.T) {
 	for _, dir := range dirs {
 		t.Run(filepath.Base(dir), func(t *testing.T) {
 			pages := loadWorkDir(t, dir)
-			before := map[*textWord]string{}
+			before := map[*ocr.Word]string{}
 			for _, lp := range pages {
-				eachWord(lp, func(w *textWord) { before[w] = w.Text })
+				eachWord(lp, func(w *ocr.Word) { before[w] = w.Text })
 			}
-			st := correctWords(pages)
+			st := CorrectWords(pages)
 			var textPages []int
 			for i, lp := range pages {
-				if lp.Kind == pageNormal {
+				if lp.Kind == Normal {
 					textPages = append(textPages, i)
 				}
 			}
 			// Without the page images, take pages that might be blank as
 			// blank.
-			for _, i := range markPictures(pages, textPages) {
+			for _, i := range MarkPictures(pages, textPages) {
 				pages[i].Blank = true
 			}
 			var changes []string
@@ -46,7 +48,7 @@ func TestFixtureBooks(t *testing.T) {
 			}
 			sort.Strings(changes)
 
-			chs, figs := layoutBook(pages)
+			chs, figs := Book(pages)
 			var body strings.Builder
 			for _, ch := range chs {
 				body.WriteString(ch.Body)
@@ -55,7 +57,7 @@ func TestFixtureBooks(t *testing.T) {
 			fmt.Printf("== %s: %d pages, %d chapters, %d figures, %d paragraphs, %d notes, %d breaks, %d h2\n",
 				filepath.Base(dir), len(pages), len(chs), len(figs), strings.Count(b, "<p"), strings.Count(b, `class="note"`),
 				strings.Count(b, `class="break"`), strings.Count(b, "<h2>"))
-			fmt.Printf("   corrected %d of %d doubtful words, removed %d note markers\n", st.corrected, st.doubtful, st.markers)
+			fmt.Printf("   corrected %d of %d doubtful words, removed %d note markers\n", st.Corrected, st.Doubtful, st.Markers)
 			for i, c := range changes {
 				if i == 40 {
 					fmt.Printf("   ... %d more\n", len(changes)-40)
@@ -71,13 +73,13 @@ func TestFixtureBooks(t *testing.T) {
 }
 
 // loadWorkDir reads the cached text of a book in page order.
-func loadWorkDir(t *testing.T, dir string) []layoutPage {
+func loadWorkDir(t *testing.T, dir string) []Page {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	byPage := map[int]*textPage{}
+	byPage := map[int]*ocr.Page{}
 	last := 0
 	for _, e := range entries {
 		var n int
@@ -89,12 +91,12 @@ func loadWorkDir(t *testing.T, dir string) []layoutPage {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var pg *textPage
+		var pg *ocr.Page
 		switch {
 		case strings.HasSuffix(name, ".tsv"):
-			pg, err = parseTSV(string(data))
+			pg, err = ocr.ParseTSV(string(data))
 		case strings.HasSuffix(name, ".alto.xml"):
-			pg, err = parseALTO(strings.NewReader(string(data)))
+			pg, err = ocr.ParseALTO(strings.NewReader(string(data)))
 		default:
 			continue
 		}
@@ -104,13 +106,13 @@ func loadWorkDir(t *testing.T, dir string) []layoutPage {
 		byPage[n] = pg
 		last = max(last, n)
 	}
-	pages := make([]layoutPage, last)
+	pages := make([]Page, last)
 	for n, pg := range byPage {
 		pages[n-1].Text = pg
 	}
 	for i := range pages {
 		if pages[i].Text == nil {
-			pages[i].Kind = pageSkip
+			pages[i].Kind = Skip
 		}
 	}
 	return pages

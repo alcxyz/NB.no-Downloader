@@ -9,7 +9,7 @@ any other nb.no login), find books as usual and click a download button, or
 paste a book's address on the command line.
 
 This is a Go rewrite of [akselsd/NB.no-Downloader](https://github.com/akselsd/NB.no-Downloader);
-the original Python script is kept in [`archived/`](archived/).
+the original Python script is in that repository's history.
 
 ## Install
 
@@ -170,6 +170,18 @@ nix develop   # Go, gopls, Chromium, Tesseract and epubcheck
 go test ./...
 NBDL_E2E=1 go test ./cmd/nbdl   # also clicks the button on nb.no in a headless browser
 ```
+
+The command in `cmd/nbdl` wires together the packages in `internal/`:
+
+- `nb`: the nb.no client (identifiers, IIIF manifest, page images, ALTO text,
+  catalogue records, cookies).
+- `browser`: the dedicated Chromium profile, login and logout.
+- `ocr`: the page text model, Tesseract TSV and ALTO parsing, and the OCR
+  engines (native Tesseract or tesseract.js in a headless browser).
+- `layout`: rebuilds chapters from the recognised pages (headings, notes,
+  figures, drop caps, word corrections).
+- `epub` and `pdf`: the output writers.
+- `parallel`: the worker pool used for downloads and OCR.
 
 `go.mod` changes need the `vendorHash` in [`nix/package.nix`](nix/package.nix)
 updated; `nix build` prints the new hash.

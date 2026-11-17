@@ -1,4 +1,4 @@
-package main
+package nb
 
 import (
 	"context"
@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/epub"
 )
 
 const catalogBase = "https://api.nb.no/catalog/v1/items/"
@@ -47,15 +49,15 @@ type catalogItem struct {
 	} `json:"accessInfo"`
 }
 
-// catalogInfo is what the EPUB needs from nb.no's catalogue.
-type catalogInfo struct {
-	Meta      bookMeta
+// CatalogInfo is what the EPUB needs from nb.no's catalogue.
+type CatalogInfo struct {
+	Meta      epub.Meta
 	Languages []string // catalogue codes, e.g. "nob"
 }
 
-// fetchCatalog reads the catalogue record. The record is optional: when it
+// FetchCatalog reads the catalogue record. The record is optional: when it
 // is missing the book still converts, with the manifest title only.
-func (d *downloader) fetchCatalog(ctx context.Context, identifier string) (*catalogInfo, error) {
+func (d *Downloader) FetchCatalog(ctx context.Context, identifier string) (*CatalogInfo, error) {
 	body, err := d.fetch(ctx, d.catalogURL(identifier), "application/")
 	if err != nil {
 		return nil, fmt.Errorf("fetch catalogue record: %w", err)
@@ -67,7 +69,7 @@ func (d *downloader) fetchCatalog(ctx context.Context, identifier string) (*cata
 	return catalogFromItem(&item, identifier), nil
 }
 
-func (d *downloader) catalogURL(identifier string) string {
+func (d *Downloader) catalogURL(identifier string) string {
 	base := d.catalog
 	if base == "" {
 		base = catalogBase
@@ -75,9 +77,9 @@ func (d *downloader) catalogURL(identifier string) string {
 	return base + url.PathEscape(identifier)
 }
 
-func catalogFromItem(item *catalogItem, identifier string) *catalogInfo {
+func catalogFromItem(item *catalogItem, identifier string) *CatalogInfo {
 	m := item.Metadata
-	info := &catalogInfo{}
+	info := &CatalogInfo{}
 	meta := &info.Meta
 
 	meta.Title = m.Title

@@ -1,10 +1,12 @@
-package main
+package layout
 
 import (
 	"image"
 	"image/color"
 	"strings"
 	"testing"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/ocr"
 )
 
 func TestFindLostCaps(t *testing.T) {
@@ -16,7 +18,7 @@ func TestFindLostCaps(t *testing.T) {
 	// An ordinary paragraph: only its first line is indented.
 	plain := blockOf(wordsLine("mens historien kan beskrives med fakta, kan ikke", 444, 1023, 1965),
 		wordsLine(long, 347, 1100, 1967), wordsLine(long, 347, 1176, 1967))
-	pages := []layoutPage{{Text: &textPage{Width: 2409, Height: 3559, Blocks: []textBlock{lost, plain}}}}
+	pages := []Page{{Text: &ocr.Page{Width: 2409, Height: 3559, Blocks: []ocr.Block{lost, plain}}}}
 	caps := findLostCaps(pages)
 	if len(caps) != 1 || caps[0].block != 0 || caps[0].merged {
 		t.Fatalf("findLostCaps = %+v", caps)
@@ -30,7 +32,7 @@ func TestFindLostCaps(t *testing.T) {
 		wordsLine(long, 347, 867, 1966))
 	merged.Lines[0].Words[0].Box.Y1 = 911
 	merged.Lines[0].Words[0].Conf = 0.25
-	pages[0].Text.Blocks = []textBlock{merged}
+	pages[0].Text.Blocks = []ocr.Block{merged}
 	if caps := findLostCaps(pages); len(caps) != 1 || !caps[0].merged {
 		t.Fatalf("merged cap: findLostCaps = %+v", caps)
 	}
@@ -55,7 +57,7 @@ func TestCapWords(t *testing.T) {
 		}
 	}
 
-	line := func(first string) textLine { return wordsLine(first+" delen av boken", 400, 100, 1000) }
+	line := func(first string) ocr.Line { return wordsLine(first+" delen av boken", 400, 100, 1000) }
 	for _, c := range []struct{ letter, first, want string }{
 		{"I", "denne", "I denne delen av boken"}, // two words the book uses
 		{"D", "ette", "Dette delen av boken"},    // one word
@@ -63,7 +65,7 @@ func TestCapWords(t *testing.T) {
 		{"Q", "zzz", "zzz delen av boken"}, // neither: left alone
 	} {
 		l := line(c.first)
-		putCap(&l, c.letter, rect{340, 90, 395, 200}, known)
+		putCap(&l, c.letter, ocr.Rect{X0: 340, Y0: 90, X1: 395, Y1: 200}, known)
 		if got := lineText(l); got != c.want {
 			t.Errorf("putCap(%q, %q) = %q, want %q", c.letter, c.first, got, c.want)
 		}
@@ -102,12 +104,12 @@ func TestCapRightEdge(t *testing.T) {
 	fill(5, 10, 25, 130)   // the cap, two lines tall
 	fill(40, 20, 290, 50)  // the first line
 	fill(40, 90, 290, 120) // the second line
-	region := rect{0, 0, 300, 140}
-	edge, ok := capRightEdge(img, region, rect{0, 10, 290, 130}, rect{40, 20, 290, 50})
+	region := ocr.Rect{X0: 0, Y0: 0, X1: 300, Y1: 140}
+	edge, ok := capRightEdge(img, region, ocr.Rect{X0: 0, Y0: 10, X1: 290, Y1: 130}, ocr.Rect{X0: 40, Y0: 20, X1: 290, Y1: 50})
 	if !ok || edge < 25 || edge > 40 {
 		t.Fatalf("capRightEdge = %v, %v; want between 25 and 40", edge, ok)
 	}
-	out := capLine(img, region, rect{0, 10, edge, 130}, rect{edge, 20, 290, 50})
+	out := capLine(img, region, ocr.Rect{X0: 0, Y0: 10, X1: edge, Y1: 130}, ocr.Rect{X0: edge, Y0: 20, X1: 290, Y1: 50})
 	if out == nil || out.Bounds().Dy() > 80 {
 		t.Fatalf("capLine gave %v", out)
 	}

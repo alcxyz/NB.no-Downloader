@@ -1,4 +1,6 @@
-package main
+// Package ocr holds the text model of a page and reads it from Tesseract
+// TSV, nb.no's ALTO files, or the page images with an OCR engine.
+package ocr
 
 import (
 	"bytes"
@@ -21,27 +23,33 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/browser"
+	"github.com/alcxyz/NB.no-Downloader/internal/nb"
 )
 
 // The text of a page, from Tesseract or from nb.no's ALTO files. Units are
 // whatever the source uses; layout code only compares values within a page
 // or as fractions of the page size.
 
-type rect struct{ X0, Y0, X1, Y1 float64 }
+// Rect is a box on the page.
+type Rect struct{ X0, Y0, X1, Y1 float64 }
 
-func (r rect) W() float64 { return r.X1 - r.X0 }
-func (r rect) H() float64 { return r.Y1 - r.Y0 }
+func (r Rect) W() float64 { return r.X1 - r.X0 }
+func (r Rect) H() float64 { return r.Y1 - r.Y0 }
 
-func (r rect) union(o rect) rect {
-	if r == (rect{}) {
+// Union returns the box around r and o; the zero Rect adds nothing.
+func (r Rect) Union(o Rect) Rect {
+	if r == (Rect{}) {
 		return o
 	}
-	return rect{min(r.X0, o.X0), min(r.Y0, o.Y0), max(r.X1, o.X1), max(r.Y1, o.Y1)}
+	return Rect{min(r.X0, o.X0), min(r.Y0, o.Y0), max(r.X1, o.X1), max(r.Y1, o.Y1)}
 }
 
-type textWord struct {
+// Word is one recognised word.
+type Word struct {
 	Text string
-	Box  rect
+	Box  Rect
 	Conf float64 // 0 to 1
 	// ALTO marks words split across lines: the first part carries the whole
 	// word, the second part is skipped.
@@ -53,31 +61,34 @@ type textWord struct {
 	Note   int
 }
 
-type textLine struct {
-	Words []textWord
-	Box   rect
+// Line is a line of words.
+type Line struct {
+	Words []Word
+	Box   Rect
 }
 
-type textBlock struct {
-	Lines  []textLine
-	Box    rect
+// Block is a paragraph or column of lines, or an illustration.
+type Block struct {
+	Lines  []Line
+	Box    Rect
 	Margin bool // ALTO page margin: running heads and page numbers
 	Image  bool // an illustration, no text
 }
 
-type textPage struct {
+// Page is the recognised text of a page.
+type Page struct {
 	Width, Height float64
-	Blocks        []textBlock
+	Blocks        []Block
 }
 
-// parseTSV reads Tesseract's TSV output. Tesseract paragraphs become
+// ParseTSV reads Tesseract's TSV output. Tesseract paragraphs become
 // blocks; its own blocks are only used to find empty regions, which are
 // usually illustrations.
-func parseTSV(tsv string) (*textPage, error) {
-	page := &textPage{}
-	var block *textBlock
-	var line *textLine
-	var emptyBlock *textBlock
+func ParseTSV(tsv string) (*Page, error) {
+	page := &Page{}
+	var block *Block
+	var line *Line
+	var emptyBlock *Block
 	flushEmpty := func() {
 		if emptyBlock != nil {
 			page.Blocks = append(page.Blocks, *emptyBlock)
@@ -100,7 +111,7 @@ func parseTSV(tsv string) (*textPage, error) {
 		for j := range n {
 			n[j], _ = strconv.ParseFloat(f[6+j], 64)
 		}
-		box := rect{n[0], n[1], n[0] + n[2], n[1] + n[3]}
+		box := Rect{n[0], n[1], n[0] + n[2], n[1] + n[3]}
 		switch level {
 		case 1:
 			page.Width, page.Height = box.W(), box.H()
@@ -108,18 +119,18 @@ func parseTSV(tsv string) (*textPage, error) {
 			flushEmpty()
 			// Tesseract reports a block before its paragraphs; keep it as
 			// a candidate image until a paragraph shows up inside it.
-			emptyBlock = &textBlock{Box: box, Image: true}
+			emptyBlock = &Block{Box: box, Image: true}
 			block, line = nil, nil
 		case 3:
 			emptyBlock = nil
-			page.Blocks = append(page.Blocks, textBlock{Box: box})
+			page.Blocks = append(page.Blocks, Block{Box: box})
 			block = &page.Blocks[len(page.Blocks)-1]
 			line = nil
 		case 4:
 			if block == nil {
 				continue
 			}
-			block.Lines = append(block.Lines, textLine{Box: box})
+			block.Lines = append(block.Lines, Line{Box: box})
 			line = &block.Lines[len(block.Lines)-1]
 		case 5:
 			text := ""
@@ -130,24 +141,24 @@ func parseTSV(tsv string) (*textPage, error) {
 				continue
 			}
 			conf, _ := strconv.ParseFloat(f[10], 64)
-			line.Words = append(line.Words, textWord{Text: text, Box: box, Conf: conf / 100})
+			line.Words = append(line.Words, Word{Text: text, Box: box, Conf: conf / 100})
 		}
 	}
 	flushEmpty()
 	return page, nil
 }
 
-// ocrEngine turns a page image into Tesseract TSV.
-type ocrEngine interface {
-	recognize(ctx context.Context, imagePath string) (string, error)
-	// recognizeLine reads an image holding a single line of text.
-	recognizeLine(ctx context.Context, imagePath string) (string, error)
-	name() string
-	close()
+// Engine turns a page image into Tesseract TSV.
+type Engine interface {
+	Recognize(ctx context.Context, imagePath string) (string, error)
+	// RecognizeLine reads an image holding a single line of text.
+	RecognizeLine(ctx context.Context, imagePath string) (string, error)
+	Name() string
+	Close()
 }
 
-// tesseractLang maps catalogue language codes to Tesseract models.
-func tesseractLang(languages []string) string {
+// Language maps catalogue language codes to Tesseract models.
+func Language(languages []string) string {
 	for _, l := range languages {
 		switch l {
 		case "eng", "en":
@@ -159,10 +170,10 @@ func tesseractLang(languages []string) string {
 	return "nor"
 }
 
-// newOCREngine prefers an installed Tesseract with the right language and
+// NewEngine prefers an installed Tesseract with the right language and
 // otherwise runs Tesseract compiled to WebAssembly in a headless browser,
 // so no separate install is needed.
-func newOCREngine(ctx context.Context, lang string, workers int) (ocrEngine, error) {
+func NewEngine(ctx context.Context, lang string, workers int) (Engine, error) {
 	if bin, err := exec.LookPath("tesseract"); err == nil {
 		out, err := exec.CommandContext(ctx, bin, "--list-langs").CombinedOutput()
 		if err == nil && hasLine(string(out), lang) {
@@ -186,14 +197,14 @@ type nativeOCR struct {
 	bin, lang string
 }
 
-func (n *nativeOCR) name() string { return "tesseract" }
-func (n *nativeOCR) close()       {}
+func (n *nativeOCR) Name() string { return "tesseract" }
+func (n *nativeOCR) Close()       {}
 
-func (n *nativeOCR) recognize(ctx context.Context, imagePath string) (string, error) {
+func (n *nativeOCR) Recognize(ctx context.Context, imagePath string) (string, error) {
 	return n.run(ctx, imagePath)
 }
 
-func (n *nativeOCR) recognizeLine(ctx context.Context, imagePath string) (string, error) {
+func (n *nativeOCR) RecognizeLine(ctx context.Context, imagePath string) (string, error) {
 	return n.run(ctx, imagePath, "--psm", "7")
 }
 
@@ -278,7 +289,7 @@ func fetchAsset(ctx context.Context, url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", nb.UserAgent)
 	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
 	if err != nil {
 		return nil, err
@@ -328,7 +339,7 @@ func newBrowserOCR(ctx context.Context, lang string, workers int) (*browserOCR, 
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(ln)
 
-	bin, err := browserPath()
+	bin, err := browser.Path()
 	if err != nil {
 		srv.Close()
 		return nil, err
@@ -378,22 +389,22 @@ func newBrowserOCR(ctx context.Context, lang string, workers int) (*browserOCR, 
 		}`, lang, max(workers, 1)).ByPromise())
 	}
 	if err != nil {
-		o.close()
+		o.Close()
 		return nil, fmt.Errorf("start built-in OCR: %w", err)
 	}
 	return o, nil
 }
 
-func (o *browserOCR) name() string { return "built-in tesseract.js" }
+func (o *browserOCR) Name() string { return "built-in tesseract.js" }
 
-func (o *browserOCR) recognize(ctx context.Context, imagePath string) (string, error) {
+func (o *browserOCR) Recognize(ctx context.Context, imagePath string) (string, error) {
 	return o.run(ctx, imagePath, `async (img) => {
 		const r = await window.nbdlOCR.addJob("recognize", img, {}, {tsv: true, text: false, blocks: false});
 		return r.data.tsv;
 	}`)
 }
 
-func (o *browserOCR) recognizeLine(ctx context.Context, imagePath string) (string, error) {
+func (o *browserOCR) RecognizeLine(ctx context.Context, imagePath string) (string, error) {
 	return o.run(ctx, imagePath, `async (img) => {
 		const w = await window.nbdlLine();
 		const r = await w.recognize(img, {}, {tsv: true, text: false, blocks: false});
@@ -421,7 +432,7 @@ func (o *browserOCR) run(ctx context.Context, imagePath, script string) (string,
 	return tsv, nil
 }
 
-func (o *browserOCR) close() {
+func (o *browserOCR) Close() {
 	if o.browser != nil {
 		o.browser.Close()
 	}

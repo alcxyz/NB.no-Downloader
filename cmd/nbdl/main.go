@@ -13,13 +13,16 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
+
+	"github.com/alcxyz/NB.no-Downloader/internal/browser"
+	"github.com/alcxyz/NB.no-Downloader/internal/nb"
+	"github.com/alcxyz/NB.no-Downloader/internal/pdf"
 )
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		if errors.Is(err, errAuth) {
+		if errors.Is(err, nb.ErrAuth) {
 			fmt.Fprintln(os.Stderr, "If this item needs a login, run: nbdl login")
 		}
 		os.Exit(1)
@@ -41,9 +44,9 @@ func run(args []string) error {
 		case "browse":
 			return browse(args[1:])
 		case "login":
-			return login()
+			return browser.Login()
 		case "logout":
-			return logout()
+			return browser.Logout()
 		case "download":
 			args = args[1:]
 		}
@@ -78,7 +81,7 @@ func run(args []string) error {
 		}
 		input = fs.Arg(0)
 	}
-	identifier, err := resolveIdentifier(input, *docType)
+	identifier, err := nb.ResolveIdentifier(input, *docType)
 	if err != nil {
 		return err
 	}
@@ -86,24 +89,24 @@ func run(args []string) error {
 	var cookies []*http.Cookie
 	switch {
 	case *cookieFile != "":
-		cookies, err = readCookies(*cookieFile)
+		cookies, err = nb.ReadCookies(*cookieFile)
 		if err != nil {
 			return err
 		}
 	case !*anonymous:
-		cookies, err = browserSession()
+		cookies, err = browser.Session()
 		if err != nil {
 			return fmt.Errorf("read login from browser profile: %w", err)
 		}
-		if len(cookies) > 0 && !hasLogin(cookies) {
+		if len(cookies) > 0 && !nb.HasLogin(cookies) {
 			fmt.Fprintln(os.Stderr, "warning: the saved nb.no login has expired; run nbdl login to renew it")
 		}
 	}
-	loggedIn := hasLogin(cookies)
+	loggedIn := nb.HasLogin(cookies)
 	if loggedIn {
 		fmt.Fprintln(os.Stderr, "using nb.no login")
 	}
-	d, err := newDownloader(cookies)
+	d, err := nb.New(cookies)
 	if err != nil {
 		return err
 	}
@@ -115,7 +118,7 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	book, err := d.fetchBook(ctx, identifier)
+	book, err := d.FetchBook(ctx, identifier)
 	if err != nil {
 		return err
 	}
@@ -130,9 +133,9 @@ func run(args []string) error {
 
 	outPath := *output
 	if outPath == "" {
-		stem := outputStem(input, identifier)
+		stem := nb.OutputStem(input, identifier)
 		if book.URN != "" && stem != input {
-			stem = outputStem(book.URN, book.URN)
+			stem = nb.OutputStem(book.URN, book.URN)
 		}
 		outPath = stem + "." + *format
 	}
@@ -153,30 +156,10 @@ func run(args []string) error {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "saved %s\n", outPath)
-	if n := d.retried.Load(); n > 0 {
+	if n := d.Retried(); n > 0 {
 		fmt.Fprintf(os.Stderr, "(%d requests were retried after transient errors)\n", n)
 	}
 	return nil
-}
-
-// newDownloader returns a downloader that sends the given nb.no cookies,
-// and the SSO access token when they include a login.
-func newDownloader(cookies []*http.Cookie) (*downloader, error) {
-	jar, err := newJar(cookies)
-	if err != nil {
-		return nil, err
-	}
-	d := &downloader{
-		client:     &http.Client{Jar: jar, Timeout: 2 * time.Minute},
-		authDomain: "nb.no",
-		manifest:   manifestBase,
-		retries:    15,
-		retryDelay: 250 * time.Millisecond,
-	}
-	if hasLogin(cookies) {
-		d.tokenURL = tokenURL
-	}
-	return d, nil
 }
 
 type saveOptions struct {
@@ -186,7 +169,7 @@ type saveOptions struct {
 }
 
 // convertBook saves book in the format opts asks for.
-func convertBook(ctx context.Context, d *downloader, book *Book, identifier, outPath string, opts saveOptions, progress progressFunc) error {
+func convertBook(ctx context.Context, d *nb.Downloader, book *nb.Book, identifier, outPath string, opts saveOptions, progress progressFunc) error {
 	if opts.format == "pdf" {
 		return saveBook(ctx, d, book, outPath, opts, func(done, total int) {
 			progress("Downloading pages", done, total)
@@ -197,14 +180,14 @@ func convertBook(ctx context.Context, d *downloader, book *Book, identifier, out
 
 // saveBook downloads every page of book next to pdfPath and writes the PDF.
 // The page images are kept after a failure, so a retry resumes.
-func saveBook(ctx context.Context, d *downloader, book *Book, pdfPath string, opts saveOptions, progress func(done, total int)) error {
+func saveBook(ctx context.Context, d *nb.Downloader, book *nb.Book, pdfPath string, opts saveOptions, progress func(done, total int)) error {
 	pagesDir := strings.TrimSuffix(pdfPath, filepath.Ext(pdfPath)) + "_pages"
-	if err := d.downloadPages(ctx, book, pagesDir, opts.width, opts.workers, progress); err != nil {
+	if err := d.DownloadPages(ctx, book, pagesDir, opts.width, opts.workers, progress); err != nil {
 		return fmt.Errorf("%w (downloaded pages are kept in %s; try again to resume)", err, pagesDir)
 	}
-	pages := make([]pdfPage, len(book.Pages))
+	pages := make([]pdf.Page, len(book.Pages))
 	for i, p := range book.Pages {
-		pages[i] = pdfPage{Path: pageFile(pagesDir, i), InchesPerPixel: p.InchesPerPixel, OriginalWidth: p.Width}
+		pages[i] = pdf.Page{Path: nb.PageFile(pagesDir, i), InchesPerPixel: p.InchesPerPixel, OriginalWidth: p.Width}
 	}
 	if err := savePDF(pdfPath, book.Title, pages); err != nil {
 		return err
@@ -215,13 +198,13 @@ func saveBook(ctx context.Context, d *downloader, book *Book, pdfPath string, op
 	return nil
 }
 
-func savePDF(path, title string, pages []pdfPage) error {
+func savePDF(path, title string, pages []pdf.Page) error {
 	tmp := path + ".part"
 	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	if err := writePDF(f, title, pages); err != nil {
+	if err := pdf.Write(f, title, pages); err != nil {
 		f.Close()
 		os.Remove(tmp)
 		return fmt.Errorf("write PDF: %w", err)
