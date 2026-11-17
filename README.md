@@ -1,169 +1,186 @@
-# Norwegian National Library Book Downloader
+# NB.no Downloader
 
-A Go utility to download and convert books from the Norwegian National Library (Nasjonalbiblioteket) into PDF files.
+`nbdl` downloads a book from the Norwegian National Library
+([nb.no](https://www.nb.no), Nasjonalbiblioteket) and saves it as an EPUB
+with real, reflowable text, or as a PDF of the scanned pages.
 
-## Description
+`nbdl` keeps its own browser for nb.no: you log in there once with BankID (or
+any other nb.no login), find books as usual and click a download button, or
+paste a book's address on the command line.
 
-This tool allows you to download books from the Norwegian National Library's digital collection and convert them to PDF format. It supports both publicly available books (`digibok_` prefix) and restricted content (`pliktmonografi_` prefix) that requires authentication.
+This is a Go rewrite of [akselsd/NB.no-Downloader](https://github.com/akselsd/NB.no-Downloader);
+the original Python script is kept in [`archived/`](archived/).
 
-This is a Go port of [akselsd/NB.no-Downloader](https://github.com/akselsd/NB.no-Downloader), originally written in Python, with additional features and improvements.
+## Install
 
-## Features
-
-- Download complete books from the Norwegian National Library
-- Support for both public (`digibok`) and restricted (`pliktmonografi`) document types
-- Automatically determine book length if not specified
-- Authentication support for restricted content (including cookie file support)
-- Convert all pages into a single PDF file
-- Customizable image quality
-- Automatic detection of introduction pages (I1, I2, etc.)
-
-## Prerequisites
-
-- Go 1.16 or higher
-- The following Go packages:
-  - `github.com/jung-kurt/gofpdf` (for PDF creation)
-
-## Installation
-
-1. Clone this repository or download the script:
+With Nix:
 
 ```bash
-git clone https://github.com/yourusername/nb-book-downloader.git
-cd nb-book-downloader
+nix run github:alcxyz/NB.no-Downloader -- <book>
+nix profile install github:alcxyz/NB.no-Downloader
 ```
 
-2. Install the required dependencies:
+The Nix package brings its own Chromium and Tesseract.
+
+With Go 1.23 or newer:
 
 ```bash
-go get github.com/jung-kurt/gofpdf
+go install github.com/alcxyz/NB.no-Downloader/cmd/nbdl@latest
 ```
+
+The login, the browser and the built-in text recognition need a
+Chromium-based browser. `nbdl` uses `$NBDL_BROWSER` if set, then an installed
+Google Chrome, Chromium or Microsoft Edge, and otherwise downloads a Chromium
+build into its cache. That downloaded build does not run on NixOS; use the Nix
+package or set `NBDL_BROWSER` there. Nothing else needs installing; see
+[EPUB](#epub) for the optional Tesseract.
 
 ## Usage
 
-### Basic Usage (Public Documents)
-
-To download a publicly available book:
+### Browsing
 
 ```bash
-go run main.go -id 123456789
+nbdl browse
 ```
 
-Or simply:
+This opens nb.no in `nbdl`'s own browser window. Log in there if you need
+to, search and open books as usual, and click **Download EPUB** in the corner
+of a book's page. The button shows the progress; you can keep browsing and
+queue more books, which are downloaded one at a time. Books are saved in
+`~/Downloads` (or the current folder if there is none), named after the book's
+title; `-dir` picks another folder. Close the window to quit; queued books
+still finish.
+
+`browse` takes the `-format`, `-width`, `-workers` and `-keep-pages` options
+described below.
+
+### From the command line
 
 ```bash
-go run main.go 123456789
+nbdl <book>
 ```
 
-### Restricted Content (With Authentication)
+`<book>` can be any of:
 
-To download restricted content using a cookie file (recommended):
+- an nb.no link: `https://www.nb.no/items/URN:NBN:no-nb_digibok_2008010300041`
+  or `https://www.nb.no/items/296c0829d64f7ba7b3a684d912920284`
+- a URN: `URN:NBN:no-nb_digibok_2008010300041`
+- a bare id with its type: `nbdl -type pliktmonografi 000040863`
+  (the type defaults to `digibok`)
+
+The book is written to `<id>.epub` (or `<id>.pdf` with `-format pdf`) in the
+current directory, or to the path given with `-o`.
+
+### EPUB
+
+An EPUB needs the book's text, which nb.no has only as images. `nbdl` gets it
+in one of two ways:
+
+- For books nb.no publishes the recognised text of (mostly books in the public
+  domain), it uses nb.no's own text.
+- For other books it recognises the text itself from the full-resolution
+  scans. It uses [Tesseract](https://github.com/tesseract-ocr/tesseract) when
+  it is installed with Norwegian (`nor`) or English data, which is fastest.
+  Otherwise it runs Tesseract compiled to WebAssembly
+  ([tesseract.js](https://github.com/naptha/tesseract.js)) in a hidden
+  browser; the first time, it downloads about 7 MB of program and language
+  files, checks them against pinned checksums and keeps them in its cache.
+
+`nbdl` then rebuilds the book: paragraphs flow across pages, words hyphenated
+at line ends are joined, running heads and page numbers are dropped, headings
+and chapters are found (including chapters numbered I, II, III), charts,
+tables, maps and illustrations are cut out of the scans as pictures with
+their labels, and title pages and picture pages are kept as images. The
+front cover becomes the cover.
+
+Where text recognition stumbles, `nbdl` reads small parts of the page images
+again: a chapter's large initial letter it missed, and the small raised
+numbers that refer to notes. Notes at the back of the book are numbered and
+linked to and from the text; a reference is linked only when its number is
+read clearly and fits the order of the others, so some stay unlinked rather
+than point to the wrong note.
+
+The EPUB carries nb.no's catalogue data: title and subtitle, authors, ISBN,
+publisher, year, language, subjects and summary, so e-book managers such as
+Calibre fill in their fields on import.
+
+Recognised text is never perfect. Modern print comes out very well; old
+Gothic type, tables, footnotes and complex layouts less so, and a chapter
+heading or chart title is sometimes taken for the other. Use `-format pdf`
+when the layout matters more than reflowing text.
+
+### Logging in
+
+Many books are only available from Norwegian IP addresses or to logged-in
+users. To log in:
 
 ```bash
-go run main.go -id 000040863 -type pliktmonografi -cookie-file cookies.txt
+nbdl login
 ```
 
-Alternative method with direct cookie string:
+A browser window opens on the nb.no login page. Log in there; the window
+closes by itself once you are logged in. Logging in on nb.no during
+`nbdl browse` works the same way. From then on every download uses the
+saved session (pass `-anonymous` to skip it). When the session expires,
+`nbdl` warns you and you run `nbdl login` again. `nbdl logout` deletes the
+saved session.
+
+The session lives in a separate browser profile, by default
+`~/.config/nb-downloader/browser-profile` (Linux) or the equivalent
+configuration directory on macOS and Windows; set `NBDL_PROFILE` to move it.
+Command-line downloads start that profile without a window for about a second
+to read the session, then download without the browser. Only one `nbdl`
+browser can use the profile at a time, so close the `browse` window before
+downloading from the command line.
+
+Without a browser, `-cookie-file` reads nb.no cookies from a file, either a
+`Cookie:` header copied from the browser's developer tools or a Netscape
+`cookies.txt` export. `-cookie-file -` reads them from standard input.
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-format` | `epub` | `epub` for recognised text, `pdf` for the page scans |
+| `-o` | `<id>.epub` | Output file |
+| `-width` | `1200` | Width in pixels of PDF pages and EPUB pictures; `0` downloads full resolution |
+| `-type` | `digibok` | Document type for a bare numeric id |
+| `-workers` | `4` | Pages downloaded in parallel |
+| `-keep-pages` | off | Keep the downloaded pages and recognised text afterwards |
+| `-anonymous` | off | Do not use the saved login |
+| `-cookie-file` | | Read cookies from a file instead of the login browser |
+
+### Interrupted downloads
+
+Pages and recognised text are saved next to the output (`<name>_work/` for an
+EPUB, `<name>_pages/` for a PDF) while `nbdl` works. If a download fails or
+you stop it, run the same command again: what is already on disk is kept and
+only the rest is fetched or recognised. The folder is removed once the book is
+written, unless `-keep-pages` is set.
+
+nb.no rejects a large share of image requests for Norway-only books with a
+`403` at random, logged in or not, so `nbdl` retries each page several times
+and reports how many requests it retried. A page that is refused every time
+is reported as an access problem.
+
+## Development
 
 ```bash
-go run main.go -id 000040863 -type pliktmonografi -cookies "_nblb=value; nbsso=value; NTID=value"
+nix develop   # Go, gopls, Chromium, Tesseract and epubcheck
+go test ./...
+NBDL_E2E=1 go test ./cmd/nbdl   # also clicks the button on nb.no in a headless browser
 ```
 
-### Command Line Options
+`go.mod` changes need the `vendorHash` in [`nix/package.nix`](nix/package.nix)
+updated; `nix build` prints the new hash.
 
-| Flag | Description | Default |
-|------|-------------|---------|
-| `-id` | Book ID to download | Required |
-| `-type` | Document type: 'digibok' or 'pliktmonografi' | digibok |
-| `-cookie-file` | Path to file containing authentication cookies | "" |
-| `-cookies` | Authentication cookies in 'name1=value1; name2=value2' format | "" |
-| `-length` | Book length (will calculate if not provided) | 0 |
-| `-width` | Image width in pixels for higher quality | 602 |
+## Legal note
 
-## How to Create a Cookie File
-
-For restricted content (pliktmonografi), the easiest way to authenticate is with a cookie file:
-
-1. Log in to www.nb.no in your browser
-2. Open developer tools (F12)
-3. Go to the Network tab and reload the page
-4. Click on any request to www.nb.no
-5. In the "Headers" tab, find the "Cookie:" header
-6. Copy the entire value (without the "Cookie:" prefix)
-7. Paste it into a text file (e.g., `cookies.txt`) and save
-
-Example cookie file content:
-```
-_nblb=value; nbsso=value; NTID=value; nb_dark_mode_enabled=true
-```
-
-## Examples
-
-### Download a Public Book
-
-```bash
-go run main.go -id 123456789
-```
-
-### Download a Restricted Book with Cookie File
-
-```bash
-go run main.go -id 000040863 -type pliktmonografi -cookie-file cookies.txt
-```
-
-### Download with Known Page Count
-
-```bash
-go run main.go -id 123456789 -length 200
-```
-
-### Download Higher Quality Images
-
-```bash
-go run main.go -id 123456789 -width 1024
-```
-
-## Output
-
-The script will:
-
-1. Create a temporary folder to store downloaded images
-2. Download all pages of the book (including front and back covers)
-3. Combine all images into a PDF file named `[book-id].pdf`
-
-## Troubleshooting
-
-### Authentication Issues
-
-If you receive "401 Unauthorized" or "403 Forbidden" errors with pliktmonografi documents:
-- Ensure you're logged in to www.nb.no in your browser when you copy the cookies
-- Make sure you've copied the entire cookie string without modifications
-- Remember that your session may expire, requiring new cookies
-
-### Download Failures
-
-If image downloads fail:
-- Check your internet connection
-- Verify the book ID is correct
-- Ensure the document exists and is accessible with your permissions
-- Try with the `-length` parameter if auto-detection fails
-
-## Limitations
-
-- Session cookies expire, so you may need to update them for long downloads
-- Very large books may take significant time and disk space
-- The National Library may change their API or structure, requiring updates to this tool
-
-## Legal Note
-
-This tool is intended for personal use within the terms of service of the Norwegian National Library. Please respect copyright laws and the library's usage policies.
+This tool is meant for personal use within the
+[terms of use](https://www.nb.no/hjelp-og-informasjon/rettigheter/) of the
+National Library. Respect copyright and the library's access conditions; a
+login gives you access, not the right to redistribute.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgments
-
-- [akselsd/NB.no-Downloader](https://github.com/akselsd/NB.no-Downloader) - The original Python implementation this project is based on
-- Norwegian National Library for providing digital access to their collection
-- The Go community for excellent libraries and tools
+MIT, see [LICENSE.md](LICENSE.md).
