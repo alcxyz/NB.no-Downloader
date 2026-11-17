@@ -9,7 +9,7 @@ any other nb.no login), find books as usual and click a download button, or
 paste a book's address on the command line.
 
 This is a Go rewrite of [akselsd/NB.no-Downloader](https://github.com/akselsd/NB.no-Downloader);
-the original Python script is kept in [`archived/`](archived/).
+the original Python script is in that repository's history.
 
 ## Install
 
